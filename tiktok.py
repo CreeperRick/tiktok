@@ -1,6 +1,7 @@
 """
 tiktok.py — fetch the latest regular video from a TikTok profile using yt-dlp.
 Explicitly skips Stories, Reposts, and Pinned items.
+Uses browser spoofing to prevent TikTok from redirecting to the homepage.
 """
 
 import subprocess
@@ -39,62 +40,76 @@ def fetch_latest_video(username: str, *, retries: int = 2, delay: float = 3.0) -
 
 def _fetch_once(username: str) -> dict | None:
     """
-    Single yt-dlp fetch targeting ONLY the regular video feed.
-    Uses /video/ sub-path to avoid the stories/repost playlists.
-    Scans up to 5 items and picks the first one that looks like a real video.
+    Single yt-dlp fetch targeting the regular video feed.
+    Tries multiple URL formats in case TikTok redirects one of them.
+    Uses browser spoofing to avoid homepage/foryou redirects.
     """
-    # /video/ forces the regular video tab — avoids stories & reposts
-    profile_url = f"https://www.tiktok.com/@{username}/video"
-
-    cmd = [
-        "yt-dlp",
-        "--dump-json",
-        "--playlist-items", "1-5",   # grab a few in case #1 is a pinned/story
-        "--no-warnings",
-        "--no-cache-dir",
-        # Tell yt-dlp to skip the Stories and LIVE tab playlists explicitly
-        "--ignore-errors",
-        profile_url,
+    # Try these URL formats in order
+    url_candidates = [
+        f"https://www.tiktok.com/@{username}/video",
+        f"https://www.tiktok.com/@{username}",
     ]
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+    for profile_url in url_candidates:
+        cmd = [
+            "yt-dlp",
+            "--dump-json",
+            "--playlist-items", "1-5",
+            "--no-warnings",
+            "--no-cache-dir",
+            "--ignore-errors",
+            # Spoof a real browser — prevents TikTok redirecting to /foryou
+            "--user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36",
+            "--add-header", "Referer:https://www.tiktok.com/",
+            "--add-header", "Accept-Language:en-US,en;q=0.9",
+            profile_url,
+        ]
 
-        if not result.stdout.strip():
-            print(f"[tiktok] No output from yt-dlp for @{username}: {result.stderr[:300]}")
-            return None
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
 
-        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
-        if not lines:
-            return None
-
-        # Walk through returned items and pick the first that is a real video
-        for line in lines:
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
+            # TikTok redirected to homepage — try next URL format
+            if "Unsupported URL" in result.stderr or "foryou" in result.stderr:
+                print(f"[tiktok] Redirected on {profile_url} for @{username}, trying fallback...")
                 continue
 
-            video = _parse_video(data)
-            if video is None:
+            if not result.stdout.strip():
+                print(f"[tiktok] No output for @{username} ({profile_url}): {result.stderr[:300]}")
                 continue
 
-            # Skip anything that smells like a story or repost
-            if _is_story_or_repost(data, video):
-                print(f"[tiktok] Skipping non-video item {video['id']!r} for @{username}")
+            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            if not lines:
                 continue
 
-            return video
+            for line in lines:
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-        print(f"[tiktok] No regular videos found for @{username}")
-        return None
+                video = _parse_video(data)
+                if video is None:
+                    continue
 
-    except subprocess.TimeoutExpired:
-        print(f"[tiktok] Timeout fetching @{username}")
-        return None
-    except Exception as e:
-        print(f"[tiktok] Unexpected error for @{username}: {e}")
-        return None
+                if _is_story_or_repost(data, video):
+                    print(f"[tiktok] Skipping non-video item {video['id']!r} for @{username}")
+                    continue
+
+                return video
+
+            print(f"[tiktok] No regular videos found at {profile_url} for @{username}")
+
+        except subprocess.TimeoutExpired:
+            print(f"[tiktok] Timeout fetching @{username}")
+        except Exception as e:
+            print(f"[tiktok] Unexpected error for @{username}: {e}")
+
+    # All URL formats exhausted
+    print(f"[tiktok] All URL formats failed for @{username}. Try: yt-dlp -U to update yt-dlp.")
+    return None
 
 
 def _parse_video(data: dict) -> dict | None:
@@ -113,36 +128,19 @@ def _parse_video(data: dict) -> dict | None:
         "url":   str(video_url),
         "desc":  desc[:300],
         "cover": cover,
-        # Keep raw data for story/repost detection
-        "_raw": data,
+        "_raw":  data,
     }
 
 
 def _is_story_or_repost(data: dict, video: dict) -> bool:
-    """
-    Returns True if this item looks like a Story, Repost, or Live clip
-    rather than a regular posted video.
-    """
     url = video["url"].lower()
-
-    # Stories have /story/ in their URL
-    if "/story/" in url:
+    if "/story/" in url or "/repost/" in url:
         return True
-
-    # Reposts often have /repost/ or a different uploader than the profile
-    if "/repost/" in url:
-        return True
-
-    # yt-dlp marks some items with an explicit type
     item_type = str(data.get("_type") or data.get("ie_key") or "").lower()
     if "story" in item_type or "live" in item_type:
         return True
-
-    # Some yt-dlp builds expose a 'view_count' of None for stories
-    # Real videos almost always have a view count
     if data.get("view_count") is None and data.get("like_count") is None:
         return True
-
     return False
 
 
