@@ -78,7 +78,7 @@ def can_use_bot(interaction: discord.Interaction) -> bool:
 
 
 # ── /addaccount  (owner only) ─────────────────────────────────────────────────
-@tree.command(name="addaccount", description="[Owner] Add a TikTok account to track")
+@tree.command(name="addaccount", description="[Admin] Add a TikTok account to track")
 @app_commands.describe(
     tiktok_username="TikTok handle to track (with or without @)",
     channel="Channel to post videos in",
@@ -88,9 +88,9 @@ async def addaccount(
     tiktok_username: str,
     channel: discord.TextChannel,
 ):
-    if not is_owner(interaction):
+    if not is_admin(interaction):
         await interaction.response.send_message(
-            "⛔ Only the server owner can add TikTok accounts.", ephemeral=True
+            "⛔ Only admins can add TikTok accounts.", ephemeral=True
         )
         return
 
@@ -125,12 +125,12 @@ async def addaccount(
 
 
 # ── /removeaccount  (owner only) ─────────────────────────────────────────────
-@tree.command(name="removeaccount", description="[Owner] Stop tracking a TikTok account")
+@tree.command(name="removeaccount", description="[Admin] Stop tracking a TikTok account")
 @app_commands.describe(tiktok_username="TikTok handle to remove")
 async def removeaccount(interaction: discord.Interaction, tiktok_username: str):
-    if not is_owner(interaction):
+    if not is_admin(interaction):
         await interaction.response.send_message(
-            "⛔ Only the server owner can remove TikTok accounts.", ephemeral=True
+            "⛔ Only admins can remove TikTok accounts.", ephemeral=True
         )
         return
 
@@ -185,7 +185,7 @@ async def listaccounts(interaction: discord.Interaction):
 
 
 # ── /setchannel  (owner only) ─────────────────────────────────────────────────
-@tree.command(name="setchannel", description="[Owner] Change the channel for a tracked TikTok account")
+@tree.command(name="setchannel", description="[Admin] Change the channel for a tracked TikTok account")
 @app_commands.describe(
     tiktok_username="TikTok handle to update",
     channel="New channel to post videos in",
@@ -195,9 +195,9 @@ async def setchannel(
     tiktok_username: str,
     channel: discord.TextChannel,
 ):
-    if not is_owner(interaction):
+    if not is_admin(interaction):
         await interaction.response.send_message(
-            "⛔ Only the server owner can change channels.", ephemeral=True
+            "⛔ Only admins can change channels.", ephemeral=True
         )
         return
 
@@ -220,7 +220,7 @@ async def setchannel(
 
 
 # ── /addping  (owner only) ────────────────────────────────────────────────────
-@tree.command(name="addping", description="[Owner] Add a user or role to ping when a TikTok account posts")
+@tree.command(name="addping", description="[Admin] Add a user or role to ping when a TikTok account posts")
 @app_commands.describe(
     tiktok_username="TikTok handle to configure pings for",
     user="User to ping (optional)",
@@ -232,9 +232,9 @@ async def addping(
     user: discord.Member = None,
     role: discord.Role = None,
 ):
-    if not is_owner(interaction):
+    if not is_admin(interaction):
         await interaction.response.send_message(
-            "⛔ Only the server owner can configure pings.", ephemeral=True
+            "⛔ Only admins can configure pings.", ephemeral=True
         )
         return
 
@@ -279,7 +279,7 @@ async def addping(
 
 
 # ── /removeping  (owner only) ─────────────────────────────────────────────────
-@tree.command(name="removeping", description="[Owner] Remove a user or role from a TikTok account's ping list")
+@tree.command(name="removeping", description="[Admin] Remove a user or role from a TikTok account's ping list")
 @app_commands.describe(
     tiktok_username="TikTok handle to configure",
     user="User to remove (optional)",
@@ -291,9 +291,9 @@ async def removeping(
     user: discord.Member = None,
     role: discord.Role = None,
 ):
-    if not is_owner(interaction):
+    if not is_admin(interaction):
         await interaction.response.send_message(
-            "⛔ Only the server owner can configure pings.", ephemeral=True
+            "⛔ Only admins can configure pings.", ephemeral=True
         )
         return
 
@@ -332,12 +332,12 @@ async def removeping(
 
 
 # ── /test  (owner only) ───────────────────────────────────────────────────────
-@tree.command(name="test", description="[Owner] Fetch the latest video for a tracked account right now")
+@tree.command(name="test", description="[Admin] Fetch the latest video for a tracked account right now")
 @app_commands.describe(tiktok_username="TikTok handle to test")
 async def test(interaction: discord.Interaction, tiktok_username: str):
-    if not is_owner(interaction):
+    if not is_admin(interaction):
         await interaction.response.send_message(
-            "⛔ Only the server owner can run test posts.", ephemeral=True
+            "⛔ Only admins can run test posts.", ephemeral=True
         )
         return
 
