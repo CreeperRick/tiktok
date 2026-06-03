@@ -71,6 +71,27 @@ def duration_display(td: timedelta) -> str:
 
 
 # ── Setup function (called from main.py) ──────────────────────────────────────
+
+class _NukeConfirmView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=30)
+        self.user_id   = user_id
+        self.confirmed = False
+
+    @discord.ui.button(label="Yes, nuke it", style=discord.ButtonStyle.danger, emoji="☢️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your confirmation.", ephemeral=True)
+            return
+        self.confirmed = True
+        self.stop()
+        await interaction.response.edit_message(content="☢️ Nuking...", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+
 def setup(bot: commands.Bot, tree: app_commands.CommandTree):
     """Register all moderation commands onto the bot's slash command tree."""
 
@@ -800,25 +821,6 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         )
 
 
-    class _NukeConfirmView(discord.ui.View):
-        def __init__(self, user_id: int):
-            super().__init__(timeout=30)
-            self.user_id   = user_id
-            self.confirmed = False
-
-        @discord.ui.button(label="Yes, nuke it", style=discord.ButtonStyle.danger, emoji="☢️")
-        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != self.user_id:
-                await interaction.response.send_message("This isn't your confirmation.", ephemeral=True)
-                return
-            self.confirmed = True
-            self.stop()
-            await interaction.response.edit_message(content="☢️ Nuking...", view=None)
-
-        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-            self.stop()
-            await interaction.response.edit_message(content="Cancelled.", view=None)
 
 
     # ── Mod log helper (used internally by all commands) ──────────────────────
