@@ -548,7 +548,8 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
     async def before_check():
         await bot.wait_until_ready()
 
-    check_temp_bans.start()
+    # Return the task so main.py starts it inside on_ready
+    return check_temp_bans
 
     # ── /softban ──────────────────────────────────────────────────────────────
     @tree.command(name="softban", description="Ban then immediately unban a member to delete their messages")
