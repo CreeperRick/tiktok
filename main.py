@@ -533,8 +533,10 @@ async def before_poll():
 async def on_ready():
     await tree.sync()
     poll_tiktoks.start()
+    if mod_tasks:
+        mod_tasks.start()
     print(f"✅ FreshTok online as {bot.user}  ({len(load_accounts())} accounts tracked)")
 
 
-setup_moderation(bot, tree)
+mod_tasks = setup_moderation(bot, tree)
 bot.run(TOKEN)
