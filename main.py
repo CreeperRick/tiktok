@@ -17,6 +17,7 @@ if _env_file.exists():
             os.environ.setdefault(_key.strip(), _val.strip())
 
 from tiktok import fetch_latest_video
+from moderation import setup as setup_moderation
 from storage import (
     load_accounts, save_accounts,
     get_last_posted, set_last_posted,
@@ -535,4 +536,5 @@ async def on_ready():
     print(f"✅ FreshTok online as {bot.user}  ({len(load_accounts())} accounts tracked)")
 
 
+setup_moderation(bot, tree)
 bot.run(TOKEN)
