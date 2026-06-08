@@ -393,22 +393,47 @@ class MusicCog(commands.Cog):
             state.now_playing_msg = await state.text_channel.send(embed=embed, view=view)
 
     async def _ensure_voice(self, interaction: discord.Interaction) -> bool:
-        """Join the user's voice channel if not already there. Returns False on failure."""
+        """Join the user's voice channel if not already there. Returns False on failure.
+
+        IMPORTANT: This method must only be called AFTER interaction.response.defer()
+        has already been sent, because connecting to voice can take several seconds and
+        Discord interaction tokens expire after 3 seconds.
+        """
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.response.send_message(
-                "❌ Join a voice channel first!", ephemeral=True
-            )
+            await interaction.followup.send("❌ Join a voice channel first!", ephemeral=True)
             return False
 
+        target_channel = interaction.user.voice.channel
         state = self.get_state(interaction.guild_id)
-        vc    = interaction.guild.voice_client
+        vc = interaction.guild.voice_client
+
+        # Clean up any stale/disconnected VoiceClient that discord.py still holds.
+        # A stale vc causes close code 4006 (session invalidated) on reconnect.
+        if vc is not None and not vc.is_connected():
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+            vc = None
+            state.voice_client = None
 
         if vc and vc.is_connected():
-            if vc.channel != interaction.user.voice.channel:
-                await vc.move_to(interaction.user.voice.channel)
+            if vc.channel.id != target_channel.id:
+                await vc.move_to(target_channel)
             state.voice_client = vc
         else:
-            state.voice_client = await interaction.user.voice.channel.connect()
+            try:
+                state.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
+            except asyncio.TimeoutError:
+                await interaction.followup.send(
+                    "❌ Timed out connecting to voice. Try again.", ephemeral=True
+                )
+                return False
+            except discord.ClientException as e:
+                await interaction.followup.send(
+                    f"❌ Could not connect to voice: {e}", ephemeral=True
+                )
+                return False
 
         state.text_channel = interaction.channel
         return True
@@ -432,10 +457,13 @@ class MusicCog(commands.Cog):
         query: str,
         source: app_commands.Choice[str] = None,
     ):
+        # Defer FIRST — Discord interaction tokens expire after 3 seconds.
+        # Voice connection can take much longer (especially on first join or
+        # after a 4006 retry), so we must secure the token before any I/O.
+        await interaction.response.defer(thinking=True)
+
         if not await self._ensure_voice(interaction):
             return
-
-        await interaction.response.defer(thinking=True)
 
         src_val = source.value if source else "auto"
         state   = self.get_state(interaction.guild_id)
