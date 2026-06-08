@@ -1,6 +1,6 @@
 """
-moderation.py — Moderation commands for FreshTok bot.
-All commands respect Discord's built-in permission system.
+moderation.py — Upgraded moderation commands for FreshTok bot.
+All commands respect Discord's built-in permission system and log cases to the mod log.
 """
 
 import discord
@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import json
 
-# ── Temp-ban storage (survives bot restarts) ──────────────────────────────────
+# ── Temp storage (survives bot restarts) ──────────────────────────────────────
 DATA_DIR    = Path(__file__).parent / "data"
 BANS_FILE   = DATA_DIR / "temp_bans.json"
 MUTES_FILE  = DATA_DIR / "temp_mutes.json"
@@ -61,6 +61,8 @@ def parse_duration(duration_str: str) -> timedelta | None:
 
 def duration_display(td: timedelta) -> str:
     """Convert a timedelta to a human-readable string like '2 hours 30 minutes'."""
+    if not td:
+        return "Permanent"
     total = int(td.total_seconds())
     parts = []
     for label, secs in [("week", 604800), ("day", 86400), ("hour", 3600), ("minute", 60), ("second", 1)]:
@@ -70,7 +72,7 @@ def duration_display(td: timedelta) -> str:
     return ", ".join(parts) or "0 seconds"
 
 
-# ── Setup function (called from main.py) ──────────────────────────────────────
+# ── Confirmation Views ─────────────────────────────────────────────────────────
 
 class _NukeConfirmView(discord.ui.View):
     def __init__(self, user_id: int):
@@ -92,8 +94,107 @@ class _NukeConfirmView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(content="Cancelled.", view=None)
 
+
+# ── Setup function (called from main.py) ──────────────────────────────────────
+
 def setup(bot: commands.Bot, tree: app_commands.CommandTree):
     """Register all moderation commands onto the bot's slash command tree."""
+
+    # ── Mod log helper (used internally by all commands) ──────────────────────
+    async def _log_action(guild: discord.Guild, action: str, user: discord.User | discord.Member,
+                          mod: discord.User | discord.Member, reason: str, duration: str = None,
+                          case_num: int = None):
+        """Post to the mod log channel if one is configured."""
+        cfg_file = DATA_DIR / f"modlog_{guild.id}.json"
+        cfg = _read(cfg_file)
+        channel_id = cfg.get("channel_id")
+        if not channel_id:
+            return
+
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+
+        color_map = {
+            "Ban": 0xFF0000, "Unban": 0x00FF00, "Kick": 0xFF6600,
+            "Timeout": 0xFFCC00, "Warn": 0xFFCC00, "Softban": 0xFF6600,
+            "Note": 0x5865F2, "Nuke": 0xFF0000, "Lock": 0xFF6600,
+            "Unlock": 0x00FF00, "Role Add": 0x00FF00, "Role Remove": 0xFF6600,
+            "Mute": 0xFF5500, "Unmute": 0x00FF00, "Lockdown": 0xFF0000,
+            "Unlockdown": 0x00FF00, "Timeout (Auto)": 0xFF3300,
+            "Mute (Auto)": 0xFF3300, "Kick (Auto)": 0xFF3300, "Ban (Auto)": 0xFF3300
+        }
+
+        embed = discord.Embed(
+            title=f"{'📋' if case_num else '🔨'} {action}" + (f" — Case #{case_num}" if case_num else ""),
+            color=color_map.get(action, 0x5865F2),
+        )
+        embed.add_field(name="User",   value=f"{user.mention} ({user.id})",  inline=True)
+        embed.add_field(name="Mod",    value=f"{mod.mention} ({mod.id})",    inline=True)
+        embed.add_field(name="Reason", value=reason,                  inline=False)
+        if duration:
+            embed.add_field(name="Duration", value=duration, inline=True)
+        embed.timestamp = datetime.utcnow()
+
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"[modlog] Failed to post log: {e}")
+
+    # ── Database / Case logger helper ─────────────────────────────────────────
+    async def _create_case(guild: discord.Guild, action: str, target: discord.User | discord.Member, 
+                           mod: discord.User | discord.Member, reason: str, duration: str = None) -> int:
+        """
+        Creates a moderation case, saves it to cases_{guild_id}.json, and posts to modlog channel.
+        Returns the generated case number.
+        """
+        cases_file = DATA_DIR / f"cases_{guild.id}.json"
+        cases = _read(cases_file)
+        case_num = len(cases) + 1
+        
+        case_data = {
+            "case_number": case_num,
+            "action": action,
+            "user_id": target.id,
+            "user_name": str(target),
+            "mod_id": mod.id,
+            "mod_name": str(mod),
+            "reason": reason,
+            "duration": duration,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        cases[str(case_num)] = case_data
+        _write(cases_file, cases)
+        
+        await _log_action(guild, action, target, mod, reason, duration, case_num)
+        return case_num
+
+    # ── Mute role helpers ─────────────────────────────────────────────────────
+    async def _get_or_create_muted_role(guild: discord.Guild) -> discord.Role | None:
+        """Retrieve the Muted role or create it with default permissions in all channels."""
+        muted_role = discord.utils.get(guild.roles, name="Muted")
+        if muted_role:
+            return muted_role
+        
+        try:
+            muted_role = await guild.create_role(name="Muted", reason="Creating Muted role for mute command.")
+            for channel in guild.channels:
+                try:
+                    if isinstance(channel, discord.TextChannel):
+                        overwrite = channel.overwrites_for(muted_role)
+                        overwrite.send_messages = False
+                        overwrite.add_reactions = False
+                        await channel.set_permissions(muted_role, overwrite=overwrite, reason="Configuring Muted role permissions.")
+                    elif isinstance(channel, discord.VoiceChannel):
+                        overwrite = channel.overwrites_for(muted_role)
+                        overwrite.speak = False
+                        await channel.set_permissions(muted_role, overwrite=overwrite, reason="Configuring Muted role permissions.")
+                except discord.Forbidden:
+                    continue
+            return muted_role
+        except discord.Forbidden:
+            return None
+
 
     # ── /ban ──────────────────────────────────────────────────────────────────
     @tree.command(name="ban", description="Ban a member. Optionally set a duration for a temp ban.")
@@ -163,15 +264,19 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
                 }
                 _write(BANS_FILE, bans)
 
+            dur_str = duration_display(td) if td else "Permanent"
+            case_num = await _create_case(interaction.guild, "Ban", member, interaction.user, reason, dur_str)
+
             embed = discord.Embed(
                 title="🔨 Member Banned",
                 color=0xFF0000,
             )
             embed.add_field(name="User",     value=f"{member} ({member.id})", inline=False)
             embed.add_field(name="Reason",   value=reason,                    inline=True)
-            embed.add_field(name="Duration", value=duration_display(td) if td else "Permanent", inline=True)
+            embed.add_field(name="Duration", value=dur_str,                   inline=True)
             embed.add_field(name="Banned by", value=interaction.user.mention, inline=True)
             embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Case #{case_num}")
             embed.timestamp = datetime.utcnow()
 
             await interaction.response.send_message(embed=embed)
@@ -212,10 +317,13 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
             bans.pop(f"{interaction.guild_id}:{uid}", None)
             _write(BANS_FILE, bans)
 
+            case_num = await _create_case(interaction.guild, "Unban", ban_entry.user, interaction.user, reason)
+
             embed = discord.Embed(title="✅ Member Unbanned", color=0x00FF00)
             embed.add_field(name="User",       value=f"{ban_entry.user} ({uid})", inline=False)
             embed.add_field(name="Reason",     value=reason,                      inline=True)
             embed.add_field(name="Unbanned by", value=interaction.user.mention,   inline=True)
+            embed.set_footer(text=f"Case #{case_num}")
             embed.timestamp = datetime.utcnow()
             await interaction.response.send_message(embed=embed)
 
@@ -257,11 +365,14 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
 
             await member.kick(reason=f"{reason} | Kicked by {interaction.user} ({interaction.user.id})")
 
+            case_num = await _create_case(interaction.guild, "Kick", member, interaction.user, reason)
+
             embed = discord.Embed(title="👢 Member Kicked", color=0xFF6600)
             embed.add_field(name="User",      value=f"{member} ({member.id})", inline=False)
             embed.add_field(name="Reason",    value=reason,                    inline=True)
             embed.add_field(name="Kicked by", value=interaction.user.mention,  inline=True)
             embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Case #{case_num}")
             embed.timestamp = datetime.utcnow()
             await interaction.response.send_message(embed=embed)
 
@@ -319,6 +430,8 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
             except discord.Forbidden:
                 pass
 
+            case_num = await _create_case(interaction.guild, "Timeout", member, interaction.user, reason, duration_display(td))
+
             embed = discord.Embed(title="⏱️ Member Timed Out", color=0xFFCC00)
             embed.add_field(name="User",        value=f"{member} ({member.id})", inline=False)
             embed.add_field(name="Duration",    value=duration_display(td),      inline=True)
@@ -326,6 +439,7 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
             embed.add_field(name="Reason",      value=reason,                    inline=False)
             embed.add_field(name="Timed out by", value=interaction.user.mention, inline=True)
             embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Case #{case_num}")
             embed.timestamp = datetime.utcnow()
             await interaction.response.send_message(embed=embed)
 
@@ -345,9 +459,13 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
 
         try:
             await member.timeout(None, reason=f"Timeout removed by {interaction.user}")
+            
+            case_num = await _create_case(interaction.guild, "Untimeout", member, interaction.user, "Timeout removed")
+
             embed = discord.Embed(title="✅ Timeout Removed", color=0x00FF00)
             embed.add_field(name="User",       value=f"{member} ({member.id})", inline=False)
             embed.add_field(name="Removed by", value=interaction.user.mention,  inline=True)
+            embed.set_footer(text=f"Case #{case_num}")
             embed.timestamp = datetime.utcnow()
             await interaction.response.send_message(embed=embed)
         except discord.Forbidden:
@@ -374,6 +492,10 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         _write(warns_file, warns)
         count = len(warns[uid])
 
+        # Create main warning case
+        case_num = await _create_case(interaction.guild, "Warn", member, interaction.user, reason)
+
+        # DM warning embed to member
         try:
             dm_embed = discord.Embed(
                 title=f"⚠️ Warning from {interaction.guild.name}",
@@ -385,12 +507,75 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         except discord.Forbidden:
             pass
 
+        # Check threshold rules
+        action_msg = ""
+        settings_file = DATA_DIR / f"warn_settings_{interaction.guild_id}.json"
+        settings = _read(settings_file)
+
+        if str(count) in settings:
+            rule = settings[str(count)]
+            action_val = rule["action"].lower()
+            duration_val = rule.get("duration")
+            auto_reason = f"Auto-moderation: Reached {count} warnings."
+
+            try:
+                if action_val == "timeout":
+                    td = parse_duration(duration_val) if duration_val else timedelta(minutes=10)
+                    until = datetime.utcnow() + td
+                    await member.timeout(until, reason=auto_reason)
+                    auto_case = await _create_case(interaction.guild, "Timeout (Auto)", member, interaction.guild.me, auto_reason, duration_display(td))
+                    action_msg = f"\n⏱️ **Auto-moderation**: Member has been timed out for {duration_display(td)} (Case #{auto_case})."
+
+                elif action_val == "mute":
+                    muted_role = await _get_or_create_muted_role(interaction.guild)
+                    if muted_role:
+                        await member.add_roles(muted_role, reason=auto_reason)
+                        td = parse_duration(duration_val) if duration_val else None
+                        if td:
+                            mutes = _read(MUTES_FILE)
+                            mutes[f"{interaction.guild_id}:{member.id}"] = {
+                                "guild_id": interaction.guild_id,
+                                "user_id": member.id,
+                                "unmute_at": (datetime.utcnow() + td).isoformat(),
+                                "reason": auto_reason,
+                            }
+                            _write(MUTES_FILE, mutes)
+
+                        auto_case = await _create_case(interaction.guild, "Mute (Auto)", member, interaction.guild.me, auto_reason, duration_display(td) if td else "Permanent")
+                        action_msg = f"\n🔇 **Auto-moderation**: Member has been muted ({duration_display(td) if td else 'permanent'}) (Case #{auto_case})."
+
+                elif action_val == "kick":
+                    await member.kick(reason=auto_reason)
+                    auto_case = await _create_case(interaction.guild, "Kick (Auto)", member, interaction.guild.me, auto_reason)
+                    action_msg = f"\n👢 **Auto-moderation**: Member has been kicked (Case #{auto_case})."
+
+                elif action_val == "ban":
+                    td = parse_duration(duration_val) if duration_val else None
+                    await member.ban(reason=auto_reason)
+                    if td:
+                        bans = _read(BANS_FILE)
+                        bans[f"{interaction.guild_id}:{member.id}"] = {
+                            "guild_id": interaction.guild_id,
+                            "user_id": member.id,
+                            "unban_at": (datetime.utcnow() + td).isoformat(),
+                            "reason": auto_reason,
+                        }
+                        _write(BANS_FILE, bans)
+
+                    auto_case = await _create_case(interaction.guild, "Ban (Auto)", member, interaction.guild.me, auto_reason, duration_display(td) if td else "Permanent")
+                    action_msg = f"\n🔨 **Auto-moderation**: Member has been banned ({duration_display(td) if td else 'permanent'}) (Case #{auto_case})."
+
+            except Exception as e:
+                action_msg = f"\n⚠️ **Auto-moderation trigger failed**: {e}"
+
         embed = discord.Embed(title="⚠️ Member Warned", color=0xFFCC00)
+        embed.description = f"Case #{case_num} created." + action_msg
         embed.add_field(name="User",           value=f"{member} ({member.id})", inline=False)
         embed.add_field(name="Reason",         value=reason,                    inline=True)
         embed.add_field(name="Total warnings", value=str(count),                inline=True)
         embed.add_field(name="Warned by",      value=interaction.user.mention,  inline=True)
         embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=f"Case #{case_num}")
         embed.timestamp = datetime.utcnow()
         await interaction.response.send_message(embed=embed)
 
@@ -446,6 +631,141 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         await interaction.response.send_message(
             f"✅ Cleared **{count}** warning(s) for **{member}**.", ephemeral=True
         )
+
+
+    # ── /mute ──────────────────────────────────────────────────────────────────
+    @tree.command(name="mute", description="Mute a member. Prevents them from sending messages or speaking in VCs.")
+    @app_commands.describe(
+        member="The member to mute",
+        reason="Reason for the mute",
+        duration="Mute duration: 10m, 2h, 1d, 1w (leave empty for permanent)",
+    )
+    async def mute(
+        interaction: discord.Interaction,
+        member: discord.Member,
+        reason: str = "No reason provided",
+        duration: str = None,
+    ):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("⛔ You don't have permission to mute members.", ephemeral=True)
+            return
+
+        if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message("⛔ You can't mute someone with an equal or higher role.", ephemeral=True)
+            return
+
+        td = parse_duration(duration) if duration else None
+        if duration and td is None:
+            await interaction.response.send_message(
+                "⚠️ Invalid duration format. Use: `10m`, `2h`, `1d`, `1w`", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+
+        muted_role = await _get_or_create_muted_role(interaction.guild)
+        if not muted_role:
+            await interaction.followup.send("⛔ I don't have permission to manage roles or create the 'Muted' role.", ephemeral=True)
+            return
+
+        if muted_role in member.roles:
+            await interaction.followup.send(f"⚠️ **{member}** is already muted.", ephemeral=True)
+            return
+
+        try:
+            await member.add_roles(muted_role, reason=f"Muted by {interaction.user} for: {reason}")
+            
+            # Save temp mute info
+            if td:
+                mutes = _read(MUTES_FILE)
+                mutes[f"{interaction.guild_id}:{member.id}"] = {
+                    "guild_id": interaction.guild_id,
+                    "user_id":  member.id,
+                    "unmute_at": (datetime.utcnow() + td).isoformat(),
+                    "reason":   reason,
+                }
+                _write(MUTES_FILE, mutes)
+
+            dur_str = duration_display(td) if td else "Permanent"
+            case_num = await _create_case(interaction.guild, "Mute", member, interaction.user, reason, dur_str)
+
+            # DM user
+            try:
+                dm_embed = discord.Embed(title=f"You have been muted in {interaction.guild.name}", color=0xFF6600)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                dm_embed.add_field(name="Duration", value=dur_str, inline=False)
+                if td:
+                    dm_embed.add_field(name="Expires", value=f"<t:{int((datetime.utcnow() + td).timestamp())}:F>", inline=False)
+                await member.send(embed=dm_embed)
+            except discord.Forbidden:
+                pass
+
+            embed = discord.Embed(title="🔇 Member Muted", color=0xFF6600)
+            embed.add_field(name="User", value=f"{member} ({member.id})", inline=False)
+            embed.add_field(name="Reason", value=reason, inline=True)
+            embed.add_field(name="Duration", value=dur_str, inline=True)
+            embed.add_field(name="Muted by", value=interaction.user.mention, inline=True)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Case #{case_num}")
+            embed.timestamp = datetime.utcnow()
+
+            await interaction.followup.send(embed=embed)
+        except discord.Forbidden:
+            await interaction.followup.send("⛔ I don't have permission to assign the 'Muted' role.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+
+    # ── /unmute ────────────────────────────────────────────────────────────────
+    @tree.command(name="unmute", description="Unmute a muted member")
+    @app_commands.describe(
+        member="The member to unmute",
+        reason="Reason for the unmute",
+    )
+    async def unmute(
+        interaction: discord.Interaction,
+        member: discord.Member,
+        reason: str = "No reason provided",
+    ):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("⛔ You don't have permission to unmute members.", ephemeral=True)
+            return
+
+        muted_role = discord.utils.get(interaction.guild.roles, name="Muted")
+        if not muted_role or muted_role not in member.roles:
+            await interaction.response.send_message("⚠️ That member isn't muted.", ephemeral=True)
+            return
+
+        try:
+            await member.remove_roles(muted_role, reason=f"Unmuted by {interaction.user}: {reason}")
+            
+            # Remove from temp mutes if exists
+            mutes = _read(MUTES_FILE)
+            mutes.pop(f"{interaction.guild_id}:{member.id}", None)
+            _write(MUTES_FILE, mutes)
+
+            case_num = await _create_case(interaction.guild, "Unmute", member, interaction.user, reason)
+
+            # DM user
+            try:
+                dm_embed = discord.Embed(title=f"You have been unmuted in {interaction.guild.name}", color=0x00FF00)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                await member.send(embed=dm_embed)
+            except discord.Forbidden:
+                pass
+
+            embed = discord.Embed(title="🔊 Member Unmuted", color=0x00FF00)
+            embed.add_field(name="User", value=f"{member} ({member.id})", inline=False)
+            embed.add_field(name="Reason", value=reason, inline=True)
+            embed.add_field(name="Unmuted by", value=interaction.user.mention, inline=True)
+            embed.set_footer(text=f"Case #{case_num}")
+            embed.timestamp = datetime.utcnow()
+
+            await interaction.response.send_message(embed=embed)
+        except discord.Forbidden:
+            await interaction.response.send_message("⛔ I don't have permission to remove the 'Muted' role.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 
     # ── /purge ────────────────────────────────────────────────────────────────
@@ -519,7 +839,9 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         overwrite = channel.overwrites_for(interaction.guild.default_role)
         overwrite.send_messages = False
         await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=reason)
-        await interaction.response.send_message(f"🔒 {channel.mention} locked. Reason: {reason}")
+        
+        case_num = await _create_case(interaction.guild, "Lock", interaction.guild.me, interaction.user, f"Channel locked: {channel.mention}. Reason: {reason}")
+        await interaction.response.send_message(f"🔒 {channel.mention} locked (Case #{case_num}). Reason: {reason}")
 
 
     @tree.command(name="unlock", description="Unlock a channel")
@@ -536,41 +858,95 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         overwrite = channel.overwrites_for(interaction.guild.default_role)
         overwrite.send_messages = None  # reset to default
         await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-        await interaction.response.send_message(f"🔓 {channel.mention} unlocked.")
+        
+        case_num = await _create_case(interaction.guild, "Unlock", interaction.guild.me, interaction.user, f"Channel unlocked: {channel.mention}")
+        await interaction.response.send_message(f"🔓 {channel.mention} unlocked (Case #{case_num}).")
 
 
-    # ── Background: auto-unban expired temp bans ──────────────────────────────
-    @tasks.loop(minutes=1)
-    async def check_temp_bans():
-        bans = _read(BANS_FILE)
-        now  = datetime.utcnow()
-        expired = []
+    # ── /lockdown ─────────────────────────────────────────────────────────────
+    @tree.command(name="lockdown", description="Lock down all text channels (denies @everyone send messages)")
+    @app_commands.describe(reason="Reason for server lockdown")
+    async def lockdown(interaction: discord.Interaction, reason: str = "No reason provided"):
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("⛔ You need Manage Channels permission.", ephemeral=True)
+            return
 
-        for key, info in bans.items():
-            if datetime.fromisoformat(info["unban_at"]) <= now:
-                guild = bot.get_guild(info["guild_id"])
-                if guild:
+        await interaction.response.defer(ephemeral=True)
+
+        locked_channels = []
+        guild = interaction.guild
+        default_role = guild.default_role
+
+        for channel in guild.text_channels:
+            overwrite = channel.overwrites_for(default_role)
+            if overwrite.send_messages is not False:
+                try:
+                    overwrite.send_messages = False
+                    await channel.set_permissions(default_role, overwrite=overwrite, reason=f"Server Lockdown: {reason}")
+                    locked_channels.append(channel.id)
+                except discord.Forbidden:
+                    continue
+                except Exception as e:
+                    print(f"[lockdown] Failed for {channel.name}: {e}")
+
+        # Save locked channels list
+        lockdown_file = DATA_DIR / f"lockdown_{interaction.guild_id}.json"
+        _write(lockdown_file, {"channels": locked_channels})
+
+        case_num = await _create_case(guild, "Lockdown", guild.me, interaction.user, reason)
+
+        await interaction.followup.send(
+            f"🔒 Server locked down. Modified **{len(locked_channels)}** text channels.\n"
+            f"Case #{case_num} created.",
+            ephemeral=True
+        )
+
+
+    # ── /unlockdown ───────────────────────────────────────────────────────────
+    @tree.command(name="unlockdown", description="Unlock server channels after a lockdown")
+    async def unlockdown(interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("⛔ You need Manage Channels permission.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        lockdown_file = DATA_DIR / f"lockdown_{interaction.guild_id}.json"
+        if not lockdown_file.exists():
+            await interaction.followup.send("⚠️ No active server lockdown record found.", ephemeral=True)
+            return
+
+        data = _read(lockdown_file)
+        locked_channels = data.get("channels", [])
+        guild = interaction.guild
+        default_role = guild.default_role
+        unlocked_count = 0
+
+        for ch_id in locked_channels:
+            channel = guild.get_channel(ch_id)
+            if channel:
+                overwrite = channel.overwrites_for(default_role)
+                if overwrite.send_messages is False:
                     try:
-                        await guild.unban(
-                            discord.Object(id=info["user_id"]),
-                            reason="Temp ban expired",
-                        )
-                        print(f"[mod] Auto-unbanned {info['user_id']} in guild {info['guild_id']}")
+                        overwrite.send_messages = None  # Reset to default
+                        await channel.set_permissions(default_role, overwrite=overwrite, reason="Server Unlockdown")
+                        unlocked_count += 1
+                    except discord.Forbidden:
+                        continue
                     except Exception as e:
-                        print(f"[mod] Auto-unban failed for {info['user_id']}: {e}")
-                expired.append(key)
+                        print(f"[unlockdown] Failed for {channel.name}: {e}")
 
-        if expired:
-            for key in expired:
-                bans.pop(key, None)
-            _write(BANS_FILE, bans)
+        # Delete record
+        lockdown_file.unlink(missing_ok=True)
 
-    @check_temp_bans.before_loop
-    async def before_check():
-        await bot.wait_until_ready()
+        case_num = await _create_case(guild, "Unlockdown", guild.me, interaction.user, "Server unlockdown")
 
-    # Return the task so main.py starts it inside on_ready
-    return check_temp_bans
+        await interaction.followup.send(
+            f"🔓 Server unlocked. Restored **{unlocked_count}** text channels.\n"
+            f"Case #{case_num} created.",
+            ephemeral=True
+        )
+
 
     # ── /softban ──────────────────────────────────────────────────────────────
     @tree.command(name="softban", description="Ban then immediately unban a member to delete their messages")
@@ -606,12 +982,15 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
             await member.ban(reason=full_reason, delete_message_days=delete_messages)
             await interaction.guild.unban(discord.Object(id=member.id), reason="Softban — immediate unban")
 
+            case_num = await _create_case(interaction.guild, "Softban", member, interaction.user, reason, f"Deleted {delete_messages}d of messages")
+
             embed = discord.Embed(title="🧹 Member Softbanned", color=0xFF6600)
             embed.add_field(name="User",        value=f"{member} ({member.id})", inline=False)
             embed.add_field(name="Reason",      value=reason,                    inline=True)
             embed.add_field(name="Msgs deleted", value=f"{delete_messages}d",   inline=True)
             embed.add_field(name="By",           value=interaction.user.mention, inline=True)
             embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Case #{case_num}")
             embed.timestamp = datetime.utcnow()
             await interaction.response.send_message(embed=embed)
 
@@ -754,10 +1133,14 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
             return
 
         await member.add_roles(role, reason=f"Added by {interaction.user}")
+        
+        case_num = await _create_case(interaction.guild, "Role Add", member, interaction.user, f"Role {role.name} added")
+
         embed = discord.Embed(title="✅ Role Added", color=role.color)
         embed.add_field(name="User", value=member.mention, inline=True)
         embed.add_field(name="Role", value=role.mention,   inline=True)
         embed.add_field(name="By",   value=interaction.user.mention, inline=True)
+        embed.set_footer(text=f"Case #{case_num}")
         await interaction.response.send_message(embed=embed)
 
 
@@ -777,10 +1160,14 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
             return
 
         await member.remove_roles(role, reason=f"Removed by {interaction.user}")
+        
+        case_num = await _create_case(interaction.guild, "Role Remove", member, interaction.user, f"Role {role.name} removed")
+
         embed = discord.Embed(title="✅ Role Removed", color=role.color)
         embed.add_field(name="User", value=member.mention, inline=True)
         embed.add_field(name="Role", value=role.mention,   inline=True)
         embed.add_field(name="By",   value=interaction.user.mention, inline=True)
+        embed.set_footer(text=f"Case #{case_num}")
         await interaction.response.send_message(embed=embed)
 
 
@@ -808,6 +1195,8 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
         channel = interaction.channel
         position = channel.position
 
+        case_num = await _create_case(interaction.guild, "Nuke", interaction.guild.me, interaction.user, f"Channel {channel.name} nuked. Reason: {reason}")
+
         new_channel = await channel.clone(reason=f"Nuked by {interaction.user} — {reason}")
         await new_channel.edit(position=position)
         await channel.delete(reason=f"Nuked by {interaction.user}")
@@ -817,46 +1206,292 @@ def setup(bot: commands.Bot, tree: app_commands.CommandTree):
                 title="☢️ Channel Nuked",
                 description=f"Nuked by {interaction.user.mention}\n**Reason:** {reason}",
                 color=0xFF0000,
-            )
+            ).set_footer(text=f"Case #{case_num}")
         )
 
 
-
-
-    # ── Mod log helper (used internally by all commands) ──────────────────────
-    async def _log_action(guild: discord.Guild, action: str, user: discord.User,
-                          mod: discord.User, reason: str, duration: str = None,
-                          case_num: int = None):
-        """Post to the mod log channel if one is configured."""
-        cfg_file = DATA_DIR / f"modlog_{guild.id}.json"
-        cfg = _read(cfg_file)
-        channel_id = cfg.get("channel_id")
-        if not channel_id:
+    # ── /whois ────────────────────────────────────────────────────────────────
+    @tree.command(name="whois", description="View detailed information about a member")
+    @app_commands.describe(member="The member to view info for")
+    async def whois(interaction: discord.Interaction, member: discord.Member):
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message("⛔ You don't have permission to use this command.", ephemeral=True)
             return
 
-        channel = guild.get_channel(channel_id)
-        if not channel:
-            return
+        # Fetch warnings
+        warns_file = DATA_DIR / f"warns_{interaction.guild_id}.json"
+        warns = _read(warns_file)
+        user_warns = warns.get(str(member.id), [])
+        warns_count = len(user_warns)
+        last_warn = user_warns[-1]["reason"] if user_warns else "None"
 
-        color_map = {
-            "Ban": 0xFF0000, "Unban": 0x00FF00, "Kick": 0xFF6600,
-            "Timeout": 0xFFCC00, "Warn": 0xFFCC00, "Softban": 0xFF6600,
-            "Note": 0x5865F2, "Nuke": 0xFF0000, "Lock": 0xFF6600,
-            "Unlock": 0x00FF00, "Role Add": 0x00FF00, "Role Remove": 0xFF6600,
-        }
+        # Fetch notes
+        notes_file = DATA_DIR / f"notes_{interaction.guild_id}.json"
+        notes = _read(notes_file)
+        user_notes = notes.get(str(member.id), [])
+        notes_count = len(user_notes)
+        last_note = user_notes[-1]["note"] if user_notes else "None"
+
+        # Key Permissions
+        key_perms = []
+        perms = member.guild_permissions
+        if perms.administrator: key_perms.append("Administrator")
+        if perms.manage_guild: key_perms.append("Manage Server")
+        if perms.ban_members: key_perms.append("Ban Members")
+        if perms.kick_members: key_perms.append("Kick Members")
+        if perms.moderate_members: key_perms.append("Timeout/Mute Members")
+        if perms.manage_channels: key_perms.append("Manage Channels")
+        if perms.manage_roles: key_perms.append("Manage Roles")
+        if perms.manage_messages: key_perms.append("Manage Messages")
+        
+        perms_str = ", ".join(key_perms) or "None"
+
+        # Roles (excluding @everyone, sorted by position)
+        roles = [r.mention for r in sorted(member.roles[1:], key=lambda r: r.position, reverse=True)]
+        roles_str = ", ".join(roles) if roles else "None"
 
         embed = discord.Embed(
-            title=f"{'📋' if case_num else '🔨'} {action}" + (f" — Case #{case_num}" if case_num else ""),
-            color=color_map.get(action, 0x5865F2),
+            title=f"👤 Member Information: {member}",
+            color=member.top_role.color if member.top_role.color.value else 0x5865F2
         )
-        embed.add_field(name="User",   value=f"{user} ({user.id})",  inline=True)
-        embed.add_field(name="Mod",    value=f"{mod} ({mod.id})",    inline=True)
-        embed.add_field(name="Reason", value=reason,                  inline=False)
-        if duration:
-            embed.add_field(name="Duration", value=duration, inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="User ID", value=str(member.id), inline=True)
+        embed.add_field(name="Mention", value=member.mention, inline=True)
+        embed.add_field(name="Nickname", value=member.nick or "None", inline=True)
+        
+        embed.add_field(name="Account Created", value=f"<t:{int(member.created_at.timestamp())}:F> (<t:{int(member.created_at.timestamp())}:R>)", inline=False)
+        embed.add_field(name="Joined Server", value=f"<t:{int(member.joined_at.timestamp())}:F> (<t:{int(member.joined_at.timestamp())}:R>)", inline=False)
+        
+        embed.add_field(name=f"Roles [{len(member.roles)-1}]", value=roles_str, inline=False)
+        embed.add_field(name="Key Permissions", value=perms_str, inline=False)
+        
+        embed.add_field(name="Warnings", value=f"Total: **{warns_count}**\n**Last reason:** {last_warn}", inline=True)
+        embed.add_field(name="Staff Notes", value=f"Total: **{notes_count}**\n**Last note:** {last_note}", inline=True)
+        
         embed.timestamp = datetime.utcnow()
+        await interaction.response.send_message(embed=embed)
 
-        try:
-            await channel.send(embed=embed)
-        except Exception as e:
-            print(f"[modlog] Failed to post log: {e}")
+
+    # ── /serverinfo ───────────────────────────────────────────────────────────
+    @tree.command(name="serverinfo", description="View detailed information about this server")
+    async def serverinfo(interaction: discord.Interaction):
+        guild = interaction.guild
+        
+        humans = sum(1 for m in guild.members if not m.bot)
+        bots = sum(1 for m in guild.members if m.bot)
+        
+        text_channels = len(guild.text_channels)
+        voice_channels = len(guild.voice_channels)
+        categories = len(guild.categories)
+        
+        embed = discord.Embed(
+            title=f"🏰 Server Information: {guild.name}",
+            color=0x5865F2
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        if guild.banner:
+            embed.set_image(url=guild.banner.url)
+            
+        embed.add_field(name="Server Owner", value=f"<@{guild.owner_id}> ({guild.owner_id})", inline=False)
+        embed.add_field(name="Server ID", value=str(guild.id), inline=True)
+        embed.add_field(name="Created At", value=f"<t:{int(guild.created_at.timestamp())}:F> (<t:{int(guild.created_at.timestamp())}:R>)", inline=False)
+        
+        embed.add_field(
+            name="Members", 
+            value=f"Total: **{guild.member_count}**\nHumans: **{humans}**\nBots: **{bots}**", 
+            inline=True
+        )
+        embed.add_field(
+            name="Channels", 
+            value=f"Categories: **{categories}**\nText: **{text_channels}**\nVoice: **{voice_channels}**", 
+            inline=True
+        )
+        embed.add_field(
+            name="Features",
+            value=f"Roles: **{len(guild.roles)}**\nEmojis: **{len(guild.emojis)}**\nBoosts: **{guild.premium_subscription_count}** (Level {guild.premium_tier})",
+            inline=True
+        )
+        
+        embed.timestamp = datetime.utcnow()
+        await interaction.response.send_message(embed=embed)
+
+
+    # ── /warnthreshold group ──────────────────────────────────────────────────
+    warnthreshold = app_commands.Group(name="warnthreshold", description="Configure auto-moderation thresholds for warnings")
+
+    @warnthreshold.command(name="set", description="Set an auto-moderation action when a user reaches a warning count")
+    @app_commands.describe(
+        count="The warning count that triggers the action",
+        action="The action to take (Timeout, Mute, Kick, Ban)",
+        duration="Duration of the action (e.g. 10m, 2h, 1d) - only for Timeout, Mute, or Ban"
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Timeout", value="timeout"),
+        app_commands.Choice(name="Mute", value="mute"),
+        app_commands.Choice(name="Kick", value="kick"),
+        app_commands.Choice(name="Ban", value="ban"),
+    ])
+    async def wt_set(
+        interaction: discord.Interaction,
+        count: int,
+        action: app_commands.Choice[str],
+        duration: str = None
+    ):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("⛔ You need Administrator permission.", ephemeral=True)
+            return
+
+        if count <= 0:
+            await interaction.response.send_message("⚠️ Warning count must be greater than 0.", ephemeral=True)
+            return
+
+        action_val = action.value
+        td = parse_duration(duration) if duration else None
+        if duration and td is None:
+            await interaction.response.send_message(
+                "⚠️ Invalid duration format. Use: `10m`, `2h`, `1d`, `1w`", ephemeral=True
+            )
+            return
+
+        settings_file = DATA_DIR / f"warn_settings_{interaction.guild_id}.json"
+        settings = _read(settings_file)
+        
+        settings[str(count)] = {
+            "action": action_val,
+            "duration": duration
+        }
+        _write(settings_file, settings)
+
+        dur_str = f" for **{duration}**" if duration else ""
+        await interaction.response.send_message(
+            f"✅ Warning threshold set: users reaching **{count}** warnings will be **{action_val}**ed{dur_str}.",
+            ephemeral=True
+        )
+
+    @warnthreshold.command(name="list", description="List all warning thresholds and rules")
+    async def wt_list(interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message("⛔ You need Kick Members permission to view rules.", ephemeral=True)
+            return
+
+        settings_file = DATA_DIR / f"warn_settings_{interaction.guild_id}.json"
+        settings = _read(settings_file)
+
+        if not settings:
+            await interaction.response.send_message("ℹ️ No warning thresholds configured. Use `/warnthreshold set` to create one.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title="⚙️ Warning Threshold Rules", color=0x5865F2)
+        sorted_keys = sorted(settings.keys(), key=int)
+        for count in sorted_keys:
+            rule = settings[count]
+            dur_str = f" ({rule['duration']})" if rule.get("duration") else ""
+            embed.add_field(
+                name=f"{count} Warning{'s' if int(count) != 1 else ''}",
+                value=f"**Action:** {rule['action'].capitalize()}{dur_str}",
+                inline=False
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @warnthreshold.command(name="remove", description="Remove a warning threshold rule")
+    @app_commands.describe(count="The warning count threshold to remove")
+    async def wt_remove(interaction: discord.Interaction, count: int):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("⛔ You need Administrator permission.", ephemeral=True)
+            return
+
+        settings_file = DATA_DIR / f"warn_settings_{interaction.guild_id}.json"
+        settings = _read(settings_file)
+        
+        if str(count) not in settings:
+            await interaction.response.send_message(f"⚠️ Threshold for {count} warnings not found.", ephemeral=True)
+            return
+
+        removed = settings.pop(str(count))
+        _write(settings_file, settings)
+
+        await interaction.response.send_message(
+            f"🗑️ Removed warning threshold rule for **{count}** warnings (which was: {removed['action']}).",
+            ephemeral=True
+        )
+
+    tree.add_command(warnthreshold)
+
+
+    # ── Background: auto-unban expired temp bans ──────────────────────────────
+    @tasks.loop(minutes=1)
+    async def check_temp_bans():
+        bans = _read(BANS_FILE)
+        now  = datetime.utcnow()
+        expired = []
+
+        for key, info in bans.items():
+            if datetime.fromisoformat(info["unban_at"]) <= now:
+                guild = bot.get_guild(info["guild_id"])
+                if guild:
+                    try:
+                        await guild.unban(
+                            discord.Object(id=info["user_id"]),
+                            reason="Temp ban expired",
+                        )
+                        print(f"[mod] Auto-unbanned {info['user_id']} in guild {info['guild_id']}")
+                        
+                        # Log unban case
+                        await _create_case(guild, "Unban (Auto)", discord.Object(id=info["user_id"]), guild.me, "Temp ban expired")
+                    except Exception as e:
+                        print(f"[mod] Auto-unban failed for {info['user_id']}: {e}")
+                expired.append(key)
+
+        if expired:
+            for key in expired:
+                bans.pop(key, None)
+            _write(BANS_FILE, bans)
+
+    @check_temp_bans.before_loop
+    async def before_check():
+        await bot.wait_until_ready()
+
+
+    # ── Background: auto-unmute expired temp mutes ─────────────────────────────
+    @tasks.loop(minutes=1)
+    async def check_temp_mutes():
+        mutes = _read(MUTES_FILE)
+        now  = datetime.utcnow()
+        expired = []
+
+        for key, info in mutes.items():
+            if datetime.fromisoformat(info["unmute_at"]) <= now:
+                guild = bot.get_guild(info["guild_id"])
+                if guild:
+                    member = guild.get_member(info["user_id"])
+                    if not member:
+                        try:
+                            member = await guild.fetch_member(info["user_id"])
+                        except Exception:
+                            member = None
+                    
+                    if member:
+                        muted_role = discord.utils.get(guild.roles, name="Muted")
+                        if muted_role and muted_role in member.roles:
+                            try:
+                                await member.remove_roles(muted_role, reason="Temp mute expired")
+                                print(f"[mod] Auto-unmuted {info['user_id']} in guild {info['guild_id']}")
+                                
+                                await _create_case(guild, "Unmute (Auto)", member, guild.me, "Temp mute expired")
+                            except Exception as e:
+                                print(f"[mod] Auto-unmute failed for {info['user_id']}: {e}")
+                expired.append(key)
+
+        if expired:
+            for key in expired:
+                mutes.pop(key, None)
+            _write(MUTES_FILE, mutes)
+
+    @check_temp_mutes.before_loop
+    async def before_check_mutes():
+        await bot.wait_until_ready()
+
+
+    # Return tasks list so main.py starts them inside on_ready
+    return [check_temp_bans, check_temp_mutes]

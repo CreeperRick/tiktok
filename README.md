@@ -1,6 +1,29 @@
 # FreshTok Discord Bot
 
-A Discord bot that monitors TikTok accounts and posts new-video alerts to your server — with a full music player and moderation system. Built with **discord.py 2.x** and **yt-dlp**. Runs on any **ARM Linux board** (Orange Pi, Rock Pi, etc.) or standard x86 Linux.
+A Discord bot that monitors TikTok accounts and posts new-video alerts to your server — with a full music player and moderation system. Built with **discord.py 2.x** and **yt-dlp**.
+
+> ✅ Runs on **Windows 10/11**, **Linux (x86_64)**, and **ARM Linux** (Orange Pi, Rock Pi, Raspberry Pi, etc.)
+
+---
+
+## Table of Contents
+
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+  - [Windows](#windows-installation)
+  - [Linux / ARM](#linux--arm-installation)
+- [Configuration](#configuration)
+- [Running the Bot](#running-the-bot)
+- [Auto-Start on Boot](#auto-start-on-boot)
+  - [Windows (Task Scheduler)](#windows--task-scheduler)
+  - [Linux (systemd)](#linux--systemd)
+- [Features](#features)
+- [Permission Model](#permission-model)
+- [Environment Variables](#environment-variables)
+- [Discord Bot Setup](#discord-bot-setup)
+- [Debugging](#debugging)
+- [Roadmap](#roadmap)
 
 ---
 
@@ -16,56 +39,200 @@ discord-tiktok-bot/
 ├── requirements.txt
 ├── .env             # Secrets — never commit this
 └── data/            # Auto-created on first run
-    ├── accounts.json         # Tracked TikTok accounts per guild
-    ├── last_posted.json      # Last posted video ID per account key
-    ├── guilds.json           # Per-guild config (allowed roles, lock status)
-    ├── temp_bans.json        # Active temp bans (survives restarts)
-    ├── warns_<guild_id>.json # Per-guild warning logs
-    └── notes_<guild_id>.json # Per-guild staff notes
+    ├── accounts.json          # Tracked TikTok accounts per guild
+    ├── last_posted.json       # Last posted video ID per account key
+    ├── guilds.json            # Per-guild config (allowed roles, lock status)
+    ├── temp_bans.json         # Active temp bans (survives restarts)
+    ├── warns_<guild_id>.json  # Per-guild warning logs
+    └── notes_<guild_id>.json  # Per-guild staff notes
 ```
 
 ---
 
-## Quick Start
+## Prerequisites
 
-### 1. Prerequisites
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.10+ | [python.org/downloads](https://www.python.org/downloads/) |
+| ffmpeg | any recent | Required for music playback |
+| Git | any | To clone the repo |
 
-- Python 3.10+
-- `ffmpeg` (for music playback):
-  ```bash
-  sudo apt update && sudo apt install -y ffmpeg
-  ```
-- `yt-dlp`:
-  ```bash
-  pip install yt-dlp
-  ```
+---
 
-### 2. Clone and install
+## Installation
+
+### Windows Installation
+
+#### 1. Install Python 3.10+
+
+1. Go to [python.org/downloads](https://www.python.org/downloads/) and download the latest Python 3.x installer.
+2. Run the installer. **Important:** check ✅ **"Add Python to PATH"** before clicking Install.
+3. Verify the install — open **Command Prompt** (`Win + R` → type `cmd` → Enter):
+
+```cmd
+python --version
+```
+
+Expected output: `Python 3.10.x` or higher.
+
+#### 2. Install ffmpeg
+
+**Option A — Winget (Windows 10/11 recommended):**
+
+```cmd
+winget install --id Gyan.FFmpeg -e
+```
+
+**Option B — Manual:**
+
+1. Download from [ffmpeg.org/download.html](https://ffmpeg.org/download.html) → Windows builds → choose **"ffmpeg-release-essentials.zip"**.
+2. Extract to `C:\ffmpeg`.
+3. Add `C:\ffmpeg\bin` to your system PATH:
+   - Search for **"Edit the system environment variables"** in Start.
+   - Click **Environment Variables** → under **System variables**, select **Path** → **Edit** → **New** → paste `C:\ffmpeg\bin` → OK.
+4. Open a **new** Command Prompt window and verify:
+
+```cmd
+ffmpeg -version
+```
+
+#### 3. Clone the Repository
+
+```cmd
+git clone https://github.com/CreeperRick/tiktok.git
+cd tiktok
+```
+
+> **No Git?** Download it from [git-scm.com](https://git-scm.com/download/win), or download the ZIP directly from GitHub and extract it.
+
+#### 4. Create a Virtual Environment
+
+```cmd
+python -m venv venv
+venv\Scripts\activate
+```
+
+Your prompt will change to `(venv) C:\...` — this confirms the venv is active.
+
+> ⚠️ **Activate the venv every time** you open a new terminal to work on the bot. The bot will not find its packages otherwise.
+
+#### 5. Install Dependencies
+
+```cmd
+pip install -r requirements.txt
+pip install spotipy PyNaCl
+```
+
+> `spotipy` and `PyNaCl` are needed for Spotify support and voice (music). If you don't need music, skip `spotipy`.
+
+---
+
+### Linux / ARM Installation
+
+These steps work on Debian/Ubuntu, Raspberry Pi OS, Orange Pi, Rock Pi, and similar distros.
+
+#### 1. Install System Packages
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3 python3-pip python3-venv ffmpeg git
+```
+
+Verify:
+
+```bash
+python3 --version   # should be 3.10+
+ffmpeg -version
+```
+
+> **ARM boards (Orange Pi, Rock Pi):** if your distro ships Python 3.9, install 3.10+ from deadsnakes:
+> ```bash
+> sudo apt install -y software-properties-common
+> sudo add-apt-repository ppa:deadsnakes/ppa
+> sudo apt install -y python3.11 python3.11-venv
+> ```
+> Then replace `python3` with `python3.11` in all commands below.
+
+#### 2. Clone the Repository
 
 ```bash
 git clone https://github.com/CreeperRick/tiktok.git
 cd tiktok
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
 ```
 
-### 3. Configure
+#### 3. Create a Virtual Environment
 
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+Your prompt will change to `(venv) user@host:...` — this confirms the venv is active.
+
+#### 4. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+pip install spotipy PyNaCl
+```
+
+---
+
+## Configuration
+
+#### 1. Copy the example env file
+
+**Windows:**
+```cmd
+copy .env.example .env
+```
+
+**Linux:**
+```bash
+cp .env.example .env
+```
+
+#### 2. Edit the .env file
+
+**Windows** (Notepad):
+```cmd
+notepad .env
+```
+
+**Linux** (nano):
 ```bash
 nano .env
 ```
 
+Fill in your values:
+
 ```env
+# ── DISCORD BOT CONFIGURATION ──────────────────────────────────────────────────
 DISCORD_TOKEN=your-bot-token-here
-SPOTIFY_CLIENT_ID=your-spotify-client-id       # optional — only needed for music
+
+# ── SPOTIFY API CONFIGURATION (OPTIONAL) ──────────────────────────────────────
+# Only needed if you want Spotify playlist/search support in the music player.
+SPOTIFY_CLIENT_ID=your-spotify-client-id
 SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
 ```
 
-- **Discord token** → [discord.com/developers](https://discord.com/developers/applications) → your app → Bot → Reset Token
-- **Spotify credentials** → [developer.spotify.com](https://developer.spotify.com/dashboard) → Create App (optional)
+- **Discord token** → [discord.com/developers](https://discord.com/developers/applications) → your app → **Bot** → **Reset Token**
+- **Spotify credentials** → [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → **Create App** (optional)
 
-### 4. Run
+> 🔒 Never commit your `.env` file. It is listed in `.gitignore` by default.
 
+---
+
+## Running the Bot
+
+Make sure your virtual environment is active first (see step 4 of installation above), then:
+
+**Windows:**
+```cmd
+python main.py
+```
+
+**Linux:**
 ```bash
 python3 main.py
 ```
@@ -75,21 +242,95 @@ Expected output:
 ✅ FreshTok online as FreshTok#1234 (0 accounts tracked)
 ```
 
+The bot will create a `data/` folder automatically on first run.
+
 ---
 
-## Dependencies (requirements.txt)
+## Auto-Start on Boot
 
-The repo currently includes:
+### Windows — Task Scheduler
 
-```txt
-discord.py>=2.3.2
-yt-dlp>=2024.1.1
+Use this to keep the bot running after reboots without keeping a terminal open.
+
+1. Search for **Task Scheduler** in Start and open it.
+2. Click **Create Basic Task** on the right panel.
+3. Fill in the wizard:
+   - **Name:** `FreshTok Bot`
+   - **Trigger:** `When the computer starts`
+   - **Action:** `Start a program`
+   - **Program/script:** full path to your venv Python, e.g.:
+     ```
+     C:\Users\YourName\tiktok\venv\Scripts\python.exe
+     ```
+   - **Add arguments:**
+     ```
+     main.py
+     ```
+   - **Start in:** full path to your bot folder, e.g.:
+     ```
+     C:\Users\YourName\tiktok
+     ```
+4. Check ✅ **"Open the Properties dialog when I click Finish"**, then in Properties → **General** → check ✅ **"Run whether user is logged on or not"**.
+5. Click **OK**.
+
+To test it, right-click the task → **Run**. Check Task Manager to confirm `python.exe` is running.
+
+**Alternatively, use a `.bat` launcher** (simpler for personal machines):
+
+Create `start_bot.bat` in your bot folder:
+
+```bat
+@echo off
+cd /d %~dp0
+call venv\Scripts\activate
+python main.py
 ```
 
-For the music player, install these additionally:
+Then add a shortcut to this `.bat` file in your Windows **Startup** folder:
+- Press `Win + R` → type `shell:startup` → drag a shortcut to `start_bot.bat` into that folder.
+
+---
+
+### Linux — systemd
 
 ```bash
-pip install spotipy PyNaCl
+sudo nano /etc/systemd/system/freshtok.service
+```
+
+Paste the following — **replace the paths** with your actual username and bot location:
+
+```ini
+[Unit]
+Description=FreshTok Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/tiktok
+ExecStart=/home/YOUR_USERNAME/tiktok/venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable freshtok
+sudo systemctl start freshtok
+sudo systemctl status freshtok
+```
+
+View live logs:
+
+```bash
+sudo journalctl -u freshtok -f
 ```
 
 ---
@@ -122,64 +363,39 @@ Commands — all admin/owner only except `/listaccounts`, `/planinfo`, and `/dis
 
 `fetch_latest_video()` double-fetches and only returns a video if both calls return the same ID — preventing stale CDN responses from triggering false posts.
 
-`_fetch_once()` tries these URL formats in order:
-1. `https://www.tiktok.com/@username/video` (explicit video feed tab)
-2. `https://www.tiktok.com/@username` (profile fallback)
+Anti-detection measures: Chrome User-Agent, Referer header, Accept-Language header, automatic `/foryou` redirect detection.
 
-Anti-detection measures:
-- Chrome 125 User-Agent header
-- `Referer: https://www.tiktok.com/` header
-- `Accept-Language: en-US,en;q=0.9` header
-- Detects `/foryou` redirect and skips to next URL format automatically
-
-Story/repost filtering (`_is_story_or_repost()`):
-- Rejects URLs containing `/story/` or `/repost/`
-- Rejects items yt-dlp flags as `story` or `live` type
-- Rejects items with no `view_count` and no `like_count` (stories have neither)
+Story/repost filtering: rejects URLs with `/story/` or `/repost/`, items flagged as `story`/`live` type, and items with no view or like counts.
 
 ### 💾 Storage (`storage.py`)
 
-Plain JSON files anchored to `Path(__file__).parent / "data"` — always relative to the script itself, not the working directory. Atomic writes via `.tmp` rename to prevent corruption on crash.
-
-| Function | File | Purpose |
-|---|---|---|
-| `load_accounts()` / `save_accounts()` | `accounts.json` | All tracked TikTok accounts |
-| `get_last_posted(key)` / `set_last_posted(key, id)` | `last_posted.json` | Deduplication |
-| `load_guild(id)` / `save_guild(id, data)` | `guilds.json` | Per-guild role config |
-
-Account keys are `guild_id:tiktok_username_lowercase` — this lets the same TikTok account be tracked independently across different servers.
+Plain JSON files anchored to the script directory — always relative, never CWD-dependent. Atomic writes via `.tmp` rename to prevent corruption on crash.
 
 ### 🛡️ Moderation (`moderation.py`)
 
 | Command | Permission | Description |
 |---|---|---|
-| `/ban @user [reason] [duration] [delete_messages]` | Ban Members | Temp or permanent ban. Duration format: `10m`, `2h`, `1d`, `1w`. Auto-unbans when expired. DMs the user before banning. |
-| `/unban <user_id> [reason]` | Ban Members | Unban by ID, removes from temp-ban tracker |
-| `/softban @user [reason] [delete_messages]` | Ban Members | Ban + immediately unban to wipe messages. User can rejoin. |
+| `/ban @user [reason] [duration] [delete_messages]` | Ban Members | Temp or permanent ban. Duration: `10m`, `2h`, `1d`, `1w`. Auto-unbans. DMs user before ban. |
+| `/unban <user_id> [reason]` | Ban Members | Unban by ID |
+| `/softban @user [reason]` | Ban Members | Ban + immediately unban to wipe messages |
 | `/kick @user [reason]` | Kick Members | Kicks and DMs the user |
-| `/timeout @user <duration> [reason]` | Moderate Members | Max 28 days (Discord limit). DMs the user with expiry time. |
+| `/timeout @user <duration> [reason]` | Moderate Members | Max 28 days. DMs with expiry time. |
 | `/untimeout @user` | Moderate Members | Remove timeout immediately |
-| `/warn @user <reason>` | Kick Members | Logs warning to `warns_<guild>.json`, DMs user |
+| `/warn @user <reason>` | Kick Members | Logs warning, DMs user |
 | `/warnings @user` | Kick Members | Shows last 10 warnings |
 | `/clearwarnings @user` | Ban Members | Wipes all warnings |
-| `/note @user <text>` | Kick Members | Silent staff note (user not notified) |
+| `/note @user <text>` | Kick Members | Silent staff note |
 | `/notes @user` | Kick Members | View all staff notes |
 | `/clearnotes @user` | Ban Members | Clear all notes |
-| `/purge <amount> [@user]` | Manage Messages | Delete 1–100 messages, optionally filtered by user |
-| `/slowmode <seconds> [#channel]` | Manage Channels | Set slowmode (0 = off, max 21600) |
-| `/lock [#channel] [reason]` | Manage Channels | Blocks @everyone from sending |
-| `/unlock [#channel]` | Manage Channels | Restores @everyone send permission |
-| `/roleadd @user @role` | Manage Roles | Add a role to a member |
-| `/roleremove @user @role` | Manage Roles | Remove a role from a member |
-| `/nuke [reason]` | Manage Channels | Clone + delete channel (clears all messages). Shows confirmation button first. |
-| `/modlog [#channel]` | Administrator | Set a channel for automatic mod action logs. Leave empty to disable. |
-| `/case <number>` | Kick Members | Look up a moderation case by number |
-
-**Auto-unban loop:** `check_temp_bans()` runs every minute. Temp bans are stored in `data/temp_bans.json` and survive bot restarts.
-
-**DM behavior:** ban, kick, timeout, and softban all attempt to DM the user before taking action. If DMs are disabled (`discord.Forbidden`), the action still proceeds silently.
-
-**Role hierarchy enforcement:** ban, kick, and softban check that the target's top role is lower than the moderator's top role (server owner bypasses this).
+| `/purge <amount> [@user]` | Manage Messages | Delete 1–100 messages |
+| `/slowmode <seconds> [#channel]` | Manage Channels | Set slowmode (0 = off) |
+| `/lock [#channel] [reason]` | Manage Channels | Block @everyone from sending |
+| `/unlock [#channel]` | Manage Channels | Restore @everyone send permission |
+| `/roleadd @user @role` | Manage Roles | Add a role |
+| `/roleremove @user @role` | Manage Roles | Remove a role |
+| `/nuke [reason]` | Manage Channels | Clone + delete channel. Requires confirmation. |
+| `/modlog [#channel]` | Administrator | Set mod log channel. Leave empty to disable. |
+| `/case <number>` | Kick Members | Look up a moderation case |
 
 ### 🎵 Music Player (`music.py`)
 
@@ -200,9 +416,7 @@ Account keys are `guild_id:tiktok_username_lowercase` — this lets the same Tik
 
 Interactive now-playing embed with buttons: ⏮️ ⏸️ ⏭️ 🔀 🔁 ⏹️
 
-**How Spotify works:** Spotify's API is metadata-only — no audio streaming. The bot searches Spotify to get the authoritative `Artist - Title`, then resolves audio via yt-dlp on YouTube. Same approach as Groovy and Rythm.
-
-**Stream URL re-resolution:** YouTube URLs expire after ~6 hours. `_play_next()` re-resolves the stream URL fresh on every song — long queues don't break.
+**How Spotify works:** Spotify's API is metadata-only. The bot resolves `Artist - Title` via Spotify, then fetches audio through yt-dlp on YouTube — same approach as Groovy and Rythm used.
 
 ---
 
@@ -211,7 +425,7 @@ Interactive now-playing embed with buttons: ⏮️ ⏸️ ⏭️ 🔀 🔁 ⏹�
 | Action | Who |
 |---|---|
 | `/addaccount` `/removeaccount` `/setchannel` `/addping` `/removeping` `/test` | Server admins + owner |
-| `/setplan` | Server owner only (permanent, cannot be undone) |
+| `/setplan` | Server owner only (permanent) |
 | `/listaccounts` `/planinfo` `/disappoint` | Anyone with an allowed role |
 | `/ban` `/unban` `/softban` `/purge` `/clearwarnings` `/clearnotes` | Ban Members |
 | `/kick` `/warn` `/warnings` `/note` `/notes` `/case` | Kick Members |
@@ -256,73 +470,70 @@ Bot permissions to select when generating your invite link:
 
 ---
 
-## Auto-Start on Boot (systemd)
-
-```bash
-sudo nano /etc/systemd/system/freshtok.service
-```
-
-```ini
-[Unit]
-Description=FreshTok Discord Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/path/to/discord-tiktok-bot
-ExecStart=/path/to/discord-tiktok-bot/venv/bin/python3 main.py
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable freshtok
-sudo systemctl start freshtok
-sudo systemctl status freshtok
-```
-
----
-
-## ARM-Specific Notes
-
-| Issue | Fix |
-|---|---|
-| `python` not found | Use `python3` explicitly (already done in the service file above) |
-| DNS resolution fails | `echo "nameserver 8.8.8.8" > /etc/resolv.conf` |
-| IPv6 connection errors | yt-dlp forces IPv4 via `source_address: 0.0.0.0` |
-| Permission denied on `data/` | `chmod -R 755 /path/to/discord-tiktok-bot/` |
-
----
-
 ## Debugging
 
+### Test TikTok scraping directly
+
+**Windows:**
+```cmd
+python -c "from tiktok import fetch_latest_video; v = fetch_latest_video('tiktok_username'); print(v)"
+```
+
+**Linux:**
 ```bash
-# Test TikTok scraping directly
 python3 -c "
 from tiktok import fetch_latest_video
 v = fetch_latest_video('tiktok_username')
 print(v)
 "
+```
 
-# Test network
+### Test network connectivity
+
+**Windows:**
+```cmd
+ping discord.com
+python -c "import socket; print(socket.gethostbyname('discord.com'))"
+```
+
+**Linux:**
+```bash
 ping -c 4 8.8.8.8
 ping -c 4 discord.com
 python3 -c "import socket; print(socket.gethostbyname('discord.com'))"
+```
 
-# Keep yt-dlp updated (TikTok changes frequently)
-yt-dlp -U
-# or
+### Update yt-dlp (do this if TikTok stops working)
+
+**Windows:**
+```cmd
+venv\Scripts\activate
 pip install -U yt-dlp
+```
 
-# Check ffmpeg
+**Linux:**
+```bash
+source venv/bin/activate
+pip install -U yt-dlp
+```
+
+### Check ffmpeg
+
+```
 ffmpeg -version
 ```
+
+### Common issues
+
+| Problem | Fix |
+|---|---|
+| `python` not found on Linux | Use `python3` explicitly |
+| `venv\Scripts\activate` fails on Windows | Run `Set-ExecutionPolicy RemoteSigned` in PowerShell (one time), or use Command Prompt instead |
+| DNS resolution fails on ARM | `echo "nameserver 8.8.8.8" > /etc/resolv.conf` |
+| IPv6 errors with yt-dlp | Already handled — yt-dlp forces IPv4 via `source_address: 0.0.0.0` |
+| `Permission denied` on `data/` (Linux) | `chmod -R 755 /path/to/discord-tiktok-bot/` |
+| Bot goes offline after closing terminal (Linux) | Use the systemd service (see [Auto-Start](#linux--systemd)) |
+| Music commands produce no sound | Confirm `ffmpeg` is installed and on PATH; reinstall `PyNaCl` |
 
 ---
 
