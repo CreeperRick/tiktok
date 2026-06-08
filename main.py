@@ -50,6 +50,7 @@ DISAPPOINTMENT_MESSAGES = [
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -534,9 +535,27 @@ async def on_ready():
     await tree.sync()
     poll_tiktoks.start()
     if mod_tasks:
-        mod_tasks.start()
+        if isinstance(mod_tasks, (list, tuple)):
+            for task in mod_tasks:
+                try:
+                    task.start()
+                except RuntimeError:
+                    pass  # Task already running
+        else:
+            try:
+                mod_tasks.start()
+            except RuntimeError:
+                pass
     print(f"✅ FreshTok online as {bot.user}  ({len(load_accounts())} accounts tracked)")
 
 
+from music import setup as setup_music
+
+async def setup_hook():
+    await setup_music(bot)
+
+bot.setup_hook = setup_hook
+
 mod_tasks = setup_moderation(bot, tree)
 bot.run(TOKEN)
+

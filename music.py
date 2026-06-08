@@ -13,6 +13,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
+import aiohttp
 
 # ─────────────────────────────────────────────
 # Config
@@ -157,12 +158,17 @@ class YTDLSource:
                 print(f"[yt-dlp] Error for '{q}': {e}")
                 return None
 
-        # Try YouTube search
-        info = await loop.run_in_executor(None, _extract, f"ytsearch:{query}")
+        is_url = query.startswith("http://") or query.startswith("https://")
 
-        # Fallback: SoundCloud search
-        if not info:
-            info = await loop.run_in_executor(None, _extract, f"scsearch:{query}")
+        if is_url:
+            info = await loop.run_in_executor(None, _extract, query)
+        else:
+            # Try YouTube search
+            info = await loop.run_in_executor(None, _extract, f"ytsearch:{query}")
+
+            # Fallback: SoundCloud search
+            if not info:
+                info = await loop.run_in_executor(None, _extract, f"scsearch:{query}")
 
         if not info:
             return None
@@ -353,7 +359,18 @@ class MusicCog(commands.Cog):
             await self._play_next(guild)
             return
 
-        audio = discord.FFmpegPCMAudio(resolved.url, **FFMPEG_OPTIONS)
+        import shutil
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            winget_path = os.path.expandvars(
+                r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe"
+            )
+            if os.path.exists(winget_path):
+                ffmpeg_bin = winget_path
+            else:
+                ffmpeg_bin = "ffmpeg"
+
+        audio = discord.FFmpegPCMAudio(resolved.url, executable=ffmpeg_bin, **FFMPEG_OPTIONS)
         audio = discord.PCMVolumeTransformer(audio, volume=state.volume)
 
         def after_song(error):
@@ -430,17 +447,63 @@ class MusicCog(commands.Cog):
                 await interaction.followup.send("❌ Could not load Spotify playlist.", ephemeral=True)
                 return
             for t in tracks:
-                song = await YTDLSource.resolve(t, self.bot.loop)
-                if song:
-                    song.requester = interaction.user
-                    song.source    = "spotify→youtube"
-                    state.queue.append(song)
+                song = Song(
+                    title=t,
+                    url="",
+                    webpage="",
+                    duration=0,
+                    thumbnail="",
+                    requester=interaction.user,
+                    source="spotify→youtube",
+                )
+                state.queue.append(song)
             await interaction.followup.send(
                 f"🟢 Added **{len(tracks)}** tracks from Spotify playlist to the queue."
             )
-            if not state.voice_client.is_playing():
+            if not state.voice_client.is_playing() and not state.voice_client.is_paused():
                 await self._play_next(interaction.guild)
             return
+
+        # ── YouTube playlist? ──
+        if "list=" in query and ("youtube.com" in query or "youtu.be" in query):
+            def _extract_playlist(q):
+                ytdl_flat = yt_dlp.YoutubeDL({"extract_flat": True, "quiet": True, "skip_download": True})
+                try:
+                    return ytdl_flat.extract_info(q, download=False)
+                except Exception as e:
+                    print(f"[yt-dlp] Playlist extract error: {e}")
+                    return None
+
+            playlist_info = await self.bot.loop.run_in_executor(None, _extract_playlist, query)
+            if playlist_info and "entries" in playlist_info:
+                entries = playlist_info["entries"]
+                added_count = 0
+                for entry in entries:
+                    if not entry:
+                        continue
+                    video_id = entry.get("id")
+                    webpage = f"https://www.youtube.com/watch?v={video_id}" if video_id else entry.get("url", "")
+                    song = Song(
+                        title=entry.get("title") or "Unknown Video",
+                        url="",
+                        webpage=webpage,
+                        duration=entry.get("duration") or 0,
+                        thumbnail=entry.get("thumbnail") or "",
+                        requester=interaction.user,
+                        source="youtube",
+                    )
+                    state.queue.append(song)
+                    added_count += 1
+                
+                await interaction.followup.send(
+                    f"🎬 Added **{added_count}** tracks from YouTube playlist to the queue."
+                )
+                if not state.voice_client.is_playing() and not state.voice_client.is_paused():
+                    await self._play_next(interaction.guild)
+                return
+            else:
+                await interaction.followup.send("❌ Could not load YouTube playlist.", ephemeral=True)
+                return
 
         # ── Spotify single track? ──
         if src_val == "spotify" or "spotify.com/track" in query:
@@ -609,6 +672,59 @@ class MusicCog(commands.Cog):
         state = self.get_state(interaction.guild_id)
         state.queue.clear()
         await interaction.response.send_message("🗑️ Queue cleared.")
+
+    @app_commands.command(name="lyrics", description="Get the lyrics of a song")
+    @app_commands.describe(query="The song to search lyrics for (optional, defaults to current song)")
+    async def lyrics(self, interaction: discord.Interaction, query: str = None):
+        await interaction.response.defer()
+        
+        search_query = query
+        if not search_query:
+            state = self.get_state(interaction.guild_id)
+            if state and state.current:
+                search_query = state.current.title
+            else:
+                await interaction.followup.send("❌ Nothing is currently playing, and no search query was provided.", ephemeral=True)
+                return
+        
+        url = f"https://some-random-api.com/lyrics?title={aiohttp.helpers.quote_plus(search_query)}"
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        lyrics_text = data.get("lyrics", "")
+                        title = data.get("title", "Unknown")
+                        author = data.get("author", "Unknown")
+                        thumbnail = data.get("thumbnail", {}).get("genius", "")
+                        
+                        if not lyrics_text:
+                            await interaction.followup.send(f"❌ Could not find lyrics for **{search_query}**.", ephemeral=True)
+                            return
+                        
+                        embeds = []
+                        # Chunk the lyrics to fit within embed limits
+                        chunks = [lyrics_text[i:i+2000] for i in range(0, len(lyrics_text), 2000)]
+                        
+                        for idx, chunk in enumerate(chunks):
+                            embed = discord.Embed(
+                                title=f"🎶 Lyrics: {title} by {author}" if idx == 0 else f"🎶 {title} (continued)",
+                                description=chunk,
+                                color=discord.Color.blurple()
+                            )
+                            if idx == 0 and thumbnail:
+                                embed.set_thumbnail(url=thumbnail)
+                            if idx == len(chunks) - 1:
+                                embed.set_footer(text="Source: Genius via Some Random API")
+                            embeds.append(embed)
+                        
+                        await interaction.followup.send(embeds=embeds)
+                    else:
+                        await interaction.followup.send(f"❌ Error searching lyrics (API returned status {resp.status}).", ephemeral=True)
+        except Exception as e:
+            print(f"[Lyrics] Error: {e}")
+            await interaction.followup.send("❌ An error occurred while fetching lyrics.", ephemeral=True)
 
 
 # ─────────────────────────────────────────────
