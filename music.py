@@ -1,5 +1,7 @@
 # music.py — Full music system: Spotify search + YouTube/SoundCloud playback
 # Queue system, shuffle, skip, interactive embed UI
+# ✨ Enhancement: YouTube sources now show a "Watch on YouTube" link button
+#    so users can follow along in their browser / watch the video.
 
 import asyncio
 import random
@@ -64,6 +66,26 @@ class Song:
         m, s = divmod(self.duration, 60)
         h, m = divmod(m, 60)
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    @property
+    def is_youtube(self) -> bool:
+        """True when this song came from YouTube (including Spotify→YouTube lookups)."""
+        return self.source in ("youtube", "spotify→youtube")
+
+    @property
+    def youtube_watch_url(self) -> Optional[str]:
+        """
+        Return a clean youtube.com/watch?v=... URL when available, else None.
+
+        We prefer the stored webpage URL because yt-dlp already normalises it.
+        For Spotify→YouTube tracks the webpage field is populated on resolve(),
+        so this will also work for those.
+        """
+        if not self.is_youtube:
+            return None
+        if self.webpage and ("youtube.com" in self.webpage or "youtu.be" in self.webpage):
+            return self.webpage
+        return None
 
 
 @dataclass
@@ -197,21 +219,72 @@ class YTDLSource:
 
 
 # ─────────────────────────────────────────────
+# YouTube "Watch Along" link button
+# ─────────────────────────────────────────────
+
+def build_youtube_watch_view(song: Song) -> Optional[discord.ui.View]:
+    """
+    Returns a discord.ui.View containing a single URL button pointing to the
+    YouTube video, or None when the song is not from YouTube.
+
+    Why a View instead of just pasting the URL?
+    - Pasting a raw URL would create a large video preview embed that floods
+      the channel.  A button keeps it compact while still being one-click.
+    - The button is rendered alongside the now-playing embed so everything
+      stays in one message.
+    """
+    watch_url = song.youtube_watch_url
+    if not watch_url:
+        return None
+
+    view = discord.ui.View(timeout=None)
+    view.add_item(
+        discord.ui.Button(
+            label="▶ Watch on YouTube",
+            style=discord.ButtonStyle.link,
+            url=watch_url,
+            emoji="🎬",
+        )
+    )
+    return view
+
+
+# ─────────────────────────────────────────────
 # Now-Playing embed + buttons
 # ─────────────────────────────────────────────
 
 class NowPlayingView(discord.ui.View):
-    """Persistent button row shown under the now-playing embed."""
+    """
+    Persistent button row shown under the now-playing embed.
+    When the song is from YouTube a 'Watch on YouTube' link button is appended
+    so users can open the video in their browser with a single click.
+    """
 
-    def __init__(self, cog: "MusicCog", guild_id: int):
+    def __init__(self, cog: "MusicCog", guild_id: int, song: Optional[Song] = None):
         super().__init__(timeout=None)
         self.cog      = cog
         self.guild_id = guild_id
 
+        # ── YouTube "Watch" link button (added first so it appears at the top) ──
+        # Link buttons cannot be inside a callback method, they must be added
+        # programmatically via add_item().
+        if song and song.youtube_watch_url:
+            self.add_item(
+                discord.ui.Button(
+                    label="▶ Watch on YouTube",
+                    style=discord.ButtonStyle.link,
+                    url=song.youtube_watch_url,
+                    emoji="🎬",
+                    row=0,  # First row — visually prominent
+                )
+            )
+
     def _state(self) -> Optional[GuildMusicState]:
         return self.cog.states.get(self.guild_id)
 
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary)
+    # ── Playback control buttons (row=1) ──────
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=1)
     async def prev_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         # Restart current song by stopping (loop handles replay if loop=True)
@@ -220,7 +293,7 @@ class NowPlayingView(discord.ui.View):
             state.voice_client.stop()
         await interaction.followup.send("⏮️ Restarting current song.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, custom_id="pause_play")
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, custom_id="pause_play", row=1)
     async def pause_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         state = self._state()
@@ -235,7 +308,7 @@ class NowPlayingView(discord.ui.View):
             button.emoji = "▶️"
             await interaction.message.edit(view=self)
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=1)
     async def skip_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
@@ -243,7 +316,7 @@ class NowPlayingView(discord.ui.View):
             state.voice_client.stop()   # Triggers after_song → plays next
         await interaction.followup.send("⏭️ Skipped.", ephemeral=True)
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
     async def shuffle_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
@@ -252,7 +325,7 @@ class NowPlayingView(discord.ui.View):
             status = "on 🔀" if state.shuffle else "off"
             await interaction.followup.send(f"Shuffle {status}", ephemeral=True)
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
     async def loop_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
@@ -271,7 +344,7 @@ class NowPlayingView(discord.ui.View):
             msg = "Loop off"
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger)
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1)
     async def stop_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
@@ -297,6 +370,17 @@ def build_now_playing_embed(song: Song, queue_len: int) -> discord.Embed:
     embed.add_field(name="Duration",   value=song.duration_str,                inline=True)
     embed.add_field(name="Requested",  value=song.requester.mention if song.requester else "—", inline=True)
     embed.add_field(name="Queue",      value=f"{queue_len} song(s) up next",   inline=True)
+
+    # ── YouTube hint ──────────────────────────────────────────────────────────
+    # Tell users about the Watch button that appears below the embed.
+    # (The actual button is in NowPlayingView, not in the embed itself.)
+    if song.is_youtube:
+        embed.add_field(
+            name="🎬 Video",
+            value="Click **▶ Watch on YouTube** below to watch the video!",
+            inline=False,
+        )
+
     if song.thumbnail:
         embed.set_thumbnail(url=song.thumbnail)
     return embed
@@ -359,6 +443,10 @@ class MusicCog(commands.Cog):
             await self._play_next(guild)
             return
 
+        # Preserve the original source label (e.g. "spotify→youtube") after re-resolve
+        resolved.source    = song.source
+        resolved.requester = song.requester
+
         import shutil
         ffmpeg_bin = shutil.which("ffmpeg")
         if not ffmpeg_bin:
@@ -380,9 +468,11 @@ class MusicCog(commands.Cog):
 
         state.voice_client.play(audio, after=after_song)
 
-        # Post / update now-playing embed
-        embed = build_now_playing_embed(song, len(state.queue))
-        view  = NowPlayingView(self, guild.id)
+        # ── Build now-playing embed + view ────────────────────────────────────
+        # NowPlayingView now receives the song so it can inject the YouTube
+        # watch-link button when appropriate.
+        embed = build_now_playing_embed(resolved, len(state.queue))
+        view  = NowPlayingView(self, guild.id, song=resolved)
 
         if state.now_playing_msg and state.text_channel:
             try:
@@ -522,7 +612,7 @@ class MusicCog(commands.Cog):
                     )
                     state.queue.append(song)
                     added_count += 1
-                
+
                 await interaction.followup.send(
                     f"🎬 Added **{added_count}** tracks from YouTube playlist to the queue."
                 )
@@ -569,7 +659,10 @@ class MusicCog(commands.Cog):
             )
             if song.thumbnail:
                 embed.set_thumbnail(url=song.thumbnail)
-            await interaction.followup.send(embed=embed)
+
+            # ── Attach a watch-link button to the "added to queue" message too ──
+            queue_view = build_youtube_watch_view(song)
+            await interaction.followup.send(embed=embed, view=queue_view)
         else:
             await interaction.followup.send(f"▶️ Starting **{song.title}**…")
             await self._play_next(interaction.guild)
@@ -680,7 +773,8 @@ class MusicCog(commands.Cog):
             await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
             return
         embed = build_now_playing_embed(state.current, len(state.queue))
-        view  = NowPlayingView(self, interaction.guild_id)
+        # Pass current song so the YouTube watch button is included
+        view  = NowPlayingView(self, interaction.guild_id, song=state.current)
         await interaction.response.send_message(embed=embed, view=view)
 
     @app_commands.command(name="remove", description="Remove a song from the queue by position")
@@ -705,7 +799,7 @@ class MusicCog(commands.Cog):
     @app_commands.describe(query="The song to search lyrics for (optional, defaults to current song)")
     async def lyrics(self, interaction: discord.Interaction, query: str = None):
         await interaction.response.defer()
-        
+
         search_query = query
         if not search_query:
             state = self.get_state(interaction.guild_id)
@@ -714,9 +808,9 @@ class MusicCog(commands.Cog):
             else:
                 await interaction.followup.send("❌ Nothing is currently playing, and no search query was provided.", ephemeral=True)
                 return
-        
+
         url = f"https://some-random-api.com/lyrics?title={aiohttp.helpers.quote_plus(search_query)}"
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
@@ -726,15 +820,15 @@ class MusicCog(commands.Cog):
                         title = data.get("title", "Unknown")
                         author = data.get("author", "Unknown")
                         thumbnail = data.get("thumbnail", {}).get("genius", "")
-                        
+
                         if not lyrics_text:
                             await interaction.followup.send(f"❌ Could not find lyrics for **{search_query}**.", ephemeral=True)
                             return
-                        
+
                         embeds = []
                         # Chunk the lyrics to fit within embed limits
                         chunks = [lyrics_text[i:i+2000] for i in range(0, len(lyrics_text), 2000)]
-                        
+
                         for idx, chunk in enumerate(chunks):
                             embed = discord.Embed(
                                 title=f"🎶 Lyrics: {title} by {author}" if idx == 0 else f"🎶 {title} (continued)",
@@ -746,7 +840,7 @@ class MusicCog(commands.Cog):
                             if idx == len(chunks) - 1:
                                 embed.set_footer(text="Source: Genius via Some Random API")
                             embeds.append(embed)
-                        
+
                         await interaction.followup.send(embeds=embeds)
                     else:
                         await interaction.followup.send(f"❌ Error searching lyrics (API returned status {resp.status}).", ephemeral=True)
