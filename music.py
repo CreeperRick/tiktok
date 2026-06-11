@@ -1,7 +1,5 @@
 # music.py — Full music system: Spotify search + YouTube/SoundCloud playback
 # Queue system, shuffle, skip, interactive embed UI
-# ✨ Enhancement: YouTube sources now show a "Watch on YouTube" link button
-#    so users can follow along in their browser / watch the video.
 
 import asyncio
 import random
@@ -25,14 +23,33 @@ SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
 # yt-dlp options — stream audio only, no file saved to disk
+# yt-dlp options — stream audio only, no file saved to disk
+# Used for single-track resolution (search queries, individual URLs)
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
-    "noplaylist": True,
+    "noplaylist": True,          # single tracks only — playlists use YTDL_PLAYLIST_OPTIONS
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # Force IPv4 (ARM boards often have IPv6 issues)
     "cookiefile": None,
+    "http_headers": {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+    },
+}
+
+# yt-dlp options for playlist extraction — flat so we get track list instantly
+# without downloading individual stream URLs (those are resolved on playback)
+YTDL_PLAYLIST_OPTIONS = {
+    "extract_flat": "in_playlist",  # get entries without resolving each video
+    "quiet": True,
+    "no_warnings": True,
+    "ignoreerrors": True,           # skip deleted/private videos silently
+    "source_address": "0.0.0.0",
     "http_headers": {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,26 +84,6 @@ class Song:
         h, m = divmod(m, 60)
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-    @property
-    def is_youtube(self) -> bool:
-        """True when this song came from YouTube (including Spotify→YouTube lookups)."""
-        return self.source in ("youtube", "spotify→youtube")
-
-    @property
-    def youtube_watch_url(self) -> Optional[str]:
-        """
-        Return a clean youtube.com/watch?v=... URL when available, else None.
-
-        We prefer the stored webpage URL because yt-dlp already normalises it.
-        For Spotify→YouTube tracks the webpage field is populated on resolve(),
-        so this will also work for those.
-        """
-        if not self.is_youtube:
-            return None
-        if self.webpage and ("youtube.com" in self.webpage or "youtu.be" in self.webpage):
-            return self.webpage
-        return None
-
 
 @dataclass
 class GuildMusicState:
@@ -105,7 +102,36 @@ class GuildMusicState:
 # Spotify helper
 # ─────────────────────────────────────────────
 
+@dataclass
+class SpotifyTrackInfo:
+    """Rich track metadata returned by SpotifySearch — used to pre-fill Song fields."""
+    search_query: str    # "Artist - Title" for YouTube search
+    title:        str    # Track name only
+    artist:       str    # Primary artist
+    duration_ms:  int    # Track duration in milliseconds
+    thumbnail:    str    # Album art URL (640×640 preferred)
+    album:        str    # Album name
+
+
+@dataclass
+class SpotifyPlaylistInfo:
+    """Metadata about the playlist itself (name, cover, owner) + its tracks."""
+    name:        str
+    owner:       str
+    cover_url:   str
+    total:       int                    # Total tracks reported by Spotify
+    tracks:      list[SpotifyTrackInfo] # All fetched tracks (paginated)
+
+
 class SpotifySearch:
+    """
+    Wrapper around spotipy that:
+    - Searches for individual tracks
+    - Fetches full playlists with pagination (handles >100-track playlists)
+    - Fetches Spotify albums
+    - Returns rich SpotifyTrackInfo objects so thumbnails/durations are preserved
+    """
+
     def __init__(self):
         if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
             auth = SpotifyClientCredentials(
@@ -115,45 +141,188 @@ class SpotifySearch:
             self.sp = spotipy.Spotify(auth_manager=auth)
         else:
             self.sp = None
+            print("[Spotify] No credentials — Spotify features disabled.")
 
-    def search(self, query: str) -> Optional[str]:
-        """
-        Search Spotify for a track.
-        Returns a YouTube-friendly search string like "Artist - Title"
-        or None if Spotify is unavailable.
-        """
+    @property
+    def available(self) -> bool:
+        return self.sp is not None
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _best_thumbnail(images: list[dict]) -> str:
+        """Pick the largest available album art URL."""
+        if not images:
+            return ""
+        # Spotify returns images sorted largest → smallest; take first
+        return images[0].get("url", "")
+
+    @staticmethod
+    def _track_to_info(track: dict) -> Optional[SpotifyTrackInfo]:
+        """Convert a raw Spotify track dict to SpotifyTrackInfo. Returns None for null tracks."""
+        if not track or track.get("type") == "episode":  # skip podcasts
+            return None
+        try:
+            artist    = track["artists"][0]["name"]
+            title     = track["name"]
+            album_art = SpotifySearch._best_thumbnail(
+                track.get("album", {}).get("images", [])
+            )
+            return SpotifyTrackInfo(
+                search_query = f"{artist} - {title}",
+                title        = title,
+                artist       = artist,
+                duration_ms  = track.get("duration_ms", 0),
+                thumbnail    = album_art,
+                album        = track.get("album", {}).get("name", ""),
+            )
+        except (KeyError, IndexError):
+            return None
+
+    # ── Public API ─────────────────────────────────────────────────────────
+
+    def search_track(self, query: str) -> Optional[SpotifyTrackInfo]:
+        """Search Spotify for a single track by name/artist. Returns rich info or None."""
         if not self.sp:
             return None
         try:
             results = self.sp.search(q=query, type="track", limit=1)
-            items = results.get("tracks", {}).get("items", [])
+            items   = results.get("tracks", {}).get("items", [])
             if not items:
                 return None
-            track = items[0]
-            artist = track["artists"][0]["name"]
-            title  = track["name"]
-            return f"{artist} - {title}"
+            return self._track_to_info(items[0])
         except Exception as e:
-            print(f"[Spotify] Search error: {e}")
+            print(f"[Spotify] search_track error: {e}")
             return None
 
-    def get_playlist_tracks(self, playlist_url: str) -> list[str]:
-        """Returns list of 'Artist - Title' strings from a Spotify playlist URL."""
+    # Keep old name as alias so existing callers still work
+    def search(self, query: str) -> Optional[str]:
+        info = self.search_track(query)
+        return info.search_query if info else None
+
+    def get_playlist(self, playlist_url: str) -> Optional[SpotifyPlaylistInfo]:
+        """
+        Fetch ALL tracks from a Spotify playlist URL, handling pagination
+        automatically (Spotify returns max 100 tracks per request).
+
+        Works with:
+          https://open.spotify.com/playlist/<id>
+          https://open.spotify.com/playlist/<id>?si=...
+        """
         if not self.sp:
-            return []
+            return None
         try:
-            playlist_id = playlist_url.split("/")[-1].split("?")[0]
-            results = self.sp.playlist_items(playlist_id, fields="items.track(name,artists)")
-            tracks = []
-            for item in results.get("items", []):
-                track = item.get("track")
-                if track:
-                    artist = track["artists"][0]["name"]
-                    tracks.append(f"{artist} - {track['name']}")
-            return tracks
+            playlist_id = playlist_url.split("/playlist/")[-1].split("?")[0]
+
+            # Fetch playlist metadata (name, cover, owner)
+            meta  = self.sp.playlist(playlist_id, fields="name,owner.display_name,images,tracks.total")
+            name  = meta.get("name", "Spotify Playlist")
+            owner = meta.get("owner", {}).get("display_name", "Unknown")
+            cover = self._best_thumbnail(meta.get("images", []))
+            total = meta.get("tracks", {}).get("total", 0)
+
+            # Paginate through all tracks (100 per page)
+            tracks: list[SpotifyTrackInfo] = []
+            offset = 0
+            fields = (
+                "items(track(name,artists,duration_ms,album(name,images))),"
+                "next"
+            )
+            while True:
+                page = self.sp.playlist_items(
+                    playlist_id,
+                    fields=fields,
+                    limit=100,
+                    offset=offset,
+                    additional_types=["track"],
+                )
+                for item in page.get("items", []):
+                    raw = item.get("track")
+                    info = self._track_to_info(raw)
+                    if info:
+                        tracks.append(info)
+
+                # If there's another page, keep going
+                if page.get("next"):
+                    offset += 100
+                else:
+                    break
+
+            return SpotifyPlaylistInfo(
+                name=name, owner=owner, cover_url=cover,
+                total=total, tracks=tracks,
+            )
+
         except Exception as e:
-            print(f"[Spotify] Playlist error: {e}")
-            return []
+            print(f"[Spotify] get_playlist error: {e}")
+            return None
+
+    def get_album(self, album_url: str) -> Optional[SpotifyPlaylistInfo]:
+        """
+        Fetch all tracks from a Spotify album URL, handling pagination.
+
+        Works with:
+          https://open.spotify.com/album/<id>
+        """
+        if not self.sp:
+            return None
+        try:
+            album_id = album_url.split("/album/")[-1].split("?")[0]
+            meta     = self.sp.album(album_id)
+            name     = meta.get("name", "Spotify Album")
+            artist   = meta.get("artists", [{}])[0].get("name", "Unknown Artist")
+            cover    = self._best_thumbnail(meta.get("images", []))
+
+            tracks: list[SpotifyTrackInfo] = []
+            # Album tracks don't embed full album object — attach it manually
+            for raw in meta.get("tracks", {}).get("items", []):
+                if not raw:
+                    continue
+                a = raw.get("artists", [{}])[0].get("name", artist)
+                t = raw.get("name", "Unknown")
+                tracks.append(SpotifyTrackInfo(
+                    search_query = f"{a} - {t}",
+                    title        = t,
+                    artist       = a,
+                    duration_ms  = raw.get("duration_ms", 0),
+                    thumbnail    = cover,   # album cover for all tracks
+                    album        = name,
+                ))
+
+            # Spotify albums can exceed 50 tracks — paginate if needed
+            page = meta.get("tracks", {})
+            offset = 50
+            while page.get("next"):
+                page = self.sp.album_tracks(album_id, limit=50, offset=offset)
+                for raw in page.get("items", []):
+                    if not raw:
+                        continue
+                    a = raw.get("artists", [{}])[0].get("name", artist)
+                    t = raw.get("name", "Unknown")
+                    tracks.append(SpotifyTrackInfo(
+                        search_query = f"{a} - {t}",
+                        title=t, artist=a,
+                        duration_ms=raw.get("duration_ms", 0),
+                        thumbnail=cover, album=name,
+                    ))
+                offset += 50
+
+            return SpotifyPlaylistInfo(
+                name=f"{name} — {artist}",
+                owner=artist,
+                cover_url=cover,
+                total=len(tracks),
+                tracks=tracks,
+            )
+
+        except Exception as e:
+            print(f"[Spotify] get_album error: {e}")
+            return None
+
+    # Keep old name as alias so existing callers still work
+    def get_playlist_tracks(self, playlist_url: str) -> list[str]:
+        info = self.get_playlist(playlist_url)
+        return [t.search_query for t in info.tracks] if info else []
 
 
 # ─────────────────────────────────────────────
@@ -219,81 +388,36 @@ class YTDLSource:
 
 
 # ─────────────────────────────────────────────
-# YouTube "Watch Along" link button
-# ─────────────────────────────────────────────
-
-def build_youtube_watch_view(song: Song) -> Optional[discord.ui.View]:
-    """
-    Returns a discord.ui.View containing a single URL button pointing to the
-    YouTube video, or None when the song is not from YouTube.
-
-    Why a View instead of just pasting the URL?
-    - Pasting a raw URL would create a large video preview embed that floods
-      the channel.  A button keeps it compact while still being one-click.
-    - The button is rendered alongside the now-playing embed so everything
-      stays in one message.
-    """
-    watch_url = song.youtube_watch_url
-    if not watch_url:
-        return None
-
-    view = discord.ui.View(timeout=None)
-    view.add_item(
-        discord.ui.Button(
-            label="▶ Watch on YouTube",
-            style=discord.ButtonStyle.link,
-            url=watch_url,
-            emoji="🎬",
-        )
-    )
-    return view
-
-
-# ─────────────────────────────────────────────
 # Now-Playing embed + buttons
 # ─────────────────────────────────────────────
 
 class NowPlayingView(discord.ui.View):
     """
-    Persistent button row shown under the now-playing embed.
-    When the song is from YouTube a 'Watch on YouTube' link button is appended
-    so users can open the video in their browser with a single click.
+    Compact button row shown under now-playing embeds (posted automatically
+    while music is playing).  Two rows:
+      Row 1 → ⏮️  ⏸️/▶️  ⏭️  🔀  🔁
+      Row 2 → 🔉  🔊  ⏹️
     """
 
-    def __init__(self, cog: "MusicCog", guild_id: int, song: Optional[Song] = None):
+    def __init__(self, cog: "MusicCog", guild_id: int):
         super().__init__(timeout=None)
         self.cog      = cog
         self.guild_id = guild_id
 
-        # ── YouTube "Watch" link button (added first so it appears at the top) ──
-        # Link buttons cannot be inside a callback method, they must be added
-        # programmatically via add_item().
-        if song and song.youtube_watch_url:
-            self.add_item(
-                discord.ui.Button(
-                    label="▶ Watch on YouTube",
-                    style=discord.ButtonStyle.link,
-                    url=song.youtube_watch_url,
-                    emoji="🎬",
-                    row=0,  # First row — visually prominent
-                )
-            )
-
     def _state(self) -> Optional[GuildMusicState]:
         return self.cog.states.get(self.guild_id)
 
-    # ── Playback control buttons (row=1) ──────
+    # ── Row 1 ──────────────────────────────────────────────────────────────
 
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
     async def prev_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
-        # Restart current song by stopping (loop handles replay if loop=True)
         state = self._state()
         if state and state.voice_client and state.voice_client.is_playing():
             state.voice_client.stop()
         await interaction.followup.send("⏮️ Restarting current song.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, custom_id="pause_play", row=1)
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, custom_id="pause_play", row=0)
     async def pause_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         state = self._state()
@@ -308,15 +432,15 @@ class NowPlayingView(discord.ui.View):
             button.emoji = "▶️"
             await interaction.message.edit(view=self)
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
         if state and state.voice_client and state.voice_client.is_playing():
-            state.voice_client.stop()   # Triggers after_song → plays next
+            state.voice_client.stop()
         await interaction.followup.send("⏭️ Skipped.", ephemeral=True)
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=0)
     async def shuffle_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
@@ -325,13 +449,12 @@ class NowPlayingView(discord.ui.View):
             status = "on 🔀" if state.shuffle else "off"
             await interaction.followup.send(f"Shuffle {status}", ephemeral=True)
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0)
     async def loop_btn(self, interaction: discord.Interaction, _):
         await interaction.response.defer()
         state = self._state()
         if not state:
             return
-        # Cycle: no loop → loop song → loop queue → no loop
         if not state.loop and not state.loop_queue:
             state.loop = True
             msg = "🔂 Looping current song"
@@ -343,6 +466,32 @@ class NowPlayingView(discord.ui.View):
             state.loop_queue = False
             msg = "Loop off"
         await interaction.followup.send(msg, ephemeral=True)
+
+    # ── Row 2 ──────────────────────────────────────────────────────────────
+
+    @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    async def vol_down_btn(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        state.volume = max(0.0, state.volume - 0.1)
+        if state.voice_client and state.voice_client.source:
+            state.voice_client.source.volume = state.volume
+        pct = round(state.volume * 100)
+        await interaction.followup.send(f"🔉 Volume → **{pct}%**", ephemeral=True)
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    async def vol_up_btn(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        state.volume = min(1.0, state.volume + 0.1)
+        if state.voice_client and state.voice_client.source:
+            state.voice_client.source.volume = state.volume
+        pct = round(state.volume * 100)
+        await interaction.followup.send(f"🔊 Volume → **{pct}%**", ephemeral=True)
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1)
     async def stop_btn(self, interaction: discord.Interaction, _):
@@ -358,6 +507,320 @@ class NowPlayingView(discord.ui.View):
         await interaction.followup.send("⏹️ Stopped and disconnected.", ephemeral=True)
 
 
+class ControlPanelView(discord.ui.View):
+    """
+    Full-featured persistent control panel posted by /controls.
+    Five rows, each button updates the panel embed on action.
+
+      Row 0 → ⏮️  ⏸️/▶️  ⏭️  ⏹️
+      Row 1 → 🔉 Vol–   🔊 Vol+   🔇 Mute
+      Row 2 → 🔀 Shuffle   🔁 Loop   📋 Queue
+      Row 3 → ➕ Spotify playlist   ➕ YouTube playlist  (labels, no modal needed)
+    """
+
+    def __init__(self, cog: "MusicCog", guild_id: int):
+        super().__init__(timeout=None)
+        self.cog      = cog
+        self.guild_id = guild_id
+        self._muted_volume: float = 0.0   # saved volume when muted
+
+    def _state(self) -> Optional[GuildMusicState]:
+        return self.cog.states.get(self.guild_id)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        """Rebuild and edit the control panel embed in-place."""
+        state = self._state()
+        embed = build_control_panel_embed(state)
+        try:
+            await interaction.message.edit(embed=embed, view=self)
+        except Exception:
+            pass
+
+    # ── Row 0: Transport ───────────────────────────────────────────────────
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    async def cp_prev(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if state and state.voice_client and state.voice_client.is_playing():
+            state.voice_client.stop()
+        await self._refresh(interaction)
+        await interaction.followup.send("⏮️ Restarting song.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary,
+                       custom_id="cp_pause_play", row=0)
+    async def cp_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        state = self._state()
+        if not state or not state.voice_client:
+            await interaction.followup.send("❌ Nothing is playing.", ephemeral=True)
+            return
+        if state.voice_client.is_paused():
+            state.voice_client.resume()
+            button.emoji = "⏸️"
+            button.label = None
+        elif state.voice_client.is_playing():
+            state.voice_client.pause()
+            button.emoji = "▶️"
+            button.label = None
+        await self._refresh(interaction)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    async def cp_skip(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if state and state.voice_client and state.voice_client.is_playing():
+            state.voice_client.stop()
+        await self._refresh(interaction)
+        await interaction.followup.send("⏭️ Skipped.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    async def cp_stop(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if state:
+            state.queue.clear()
+            state.loop = state.loop_queue = False
+            if state.voice_client:
+                await state.voice_client.disconnect()
+            self.cog.states.pop(self.guild_id, None)
+        stopped_embed = discord.Embed(
+            title="🎵 Music Controls",
+            description="⏹️ Playback stopped. Use `/play` to start again.",
+            color=discord.Color.red(),
+        )
+        try:
+            await interaction.message.edit(embed=stopped_embed, view=None)
+        except Exception:
+            pass
+        await interaction.followup.send("⏹️ Stopped and disconnected.", ephemeral=True)
+
+    # ── Row 1: Volume ──────────────────────────────────────────────────────
+
+    @discord.ui.button(label="🔉 Vol–", style=discord.ButtonStyle.secondary, row=1)
+    async def cp_vol_down(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        state.volume = max(0.0, round(state.volume - 0.1, 2))
+        if state.voice_client and state.voice_client.source:
+            state.voice_client.source.volume = state.volume
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="🔊 Vol+", style=discord.ButtonStyle.secondary, row=1)
+    async def cp_vol_up(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        state.volume = min(1.0, round(state.volume + 0.1, 2))
+        if state.voice_client and state.voice_client.source:
+            state.voice_client.source.volume = state.volume
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="🔇 Mute", style=discord.ButtonStyle.secondary, row=1)
+    async def cp_mute(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        if state.volume > 0:
+            # Mute: save current volume, set to 0
+            self._muted_volume = state.volume
+            state.volume = 0.0
+            button.label = "🔈 Unmute"
+            button.style = discord.ButtonStyle.danger
+        else:
+            # Unmute: restore saved volume (or 0.5 as default)
+            state.volume = self._muted_volume if self._muted_volume > 0 else 0.5
+            button.label = "🔇 Mute"
+            button.style = discord.ButtonStyle.secondary
+        if state.voice_client and state.voice_client.source:
+            state.voice_client.source.volume = state.volume
+        await self._refresh(interaction)
+
+    # ── Row 2: Modes + Queue ───────────────────────────────────────────────
+
+    @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, row=2)
+    async def cp_shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        state.shuffle = not state.shuffle
+        button.style = (discord.ButtonStyle.success if state.shuffle
+                        else discord.ButtonStyle.secondary)
+        await self._refresh(interaction)
+        await interaction.followup.send(
+            f"🔀 Shuffle {'**on**' if state.shuffle else 'off'}", ephemeral=True
+        )
+
+    @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.secondary, row=2)
+    async def cp_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        state = self._state()
+        if not state:
+            return
+        if not state.loop and not state.loop_queue:
+            state.loop = True
+            button.label = "🔂 Song"
+            button.style = discord.ButtonStyle.success
+            msg = "🔂 Looping current song"
+        elif state.loop:
+            state.loop = False
+            state.loop_queue = True
+            button.label = "🔁 Queue"
+            button.style = discord.ButtonStyle.success
+            msg = "🔁 Looping queue"
+        else:
+            state.loop_queue = False
+            button.label = "🔁 Loop"
+            button.style = discord.ButtonStyle.secondary
+            msg = "Loop off"
+        await self._refresh(interaction)
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @discord.ui.button(label="📋 Queue", style=discord.ButtonStyle.secondary, row=2)
+    async def cp_queue(self, interaction: discord.Interaction, _):
+        await interaction.response.defer()
+        state = self._state()
+        if not state or (not state.current and not state.queue):
+            await interaction.followup.send("📭 Queue is empty.", ephemeral=True)
+            return
+
+        lines = []
+        if state.current:
+            lines.append(
+                f"▶️ **{state.current.title}** `{state.current.duration_str}`"
+                f" — {state.current.requester.mention if state.current.requester else '—'}"
+            )
+        for i, s in enumerate(list(state.queue)[:10], 1):
+            lines.append(f"`{i}.` {s.title} `{s.duration_str}`")
+        if len(state.queue) > 10:
+            lines.append(f"… and **{len(state.queue) - 10}** more")
+
+        embed = discord.Embed(
+            title="📋 Queue",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Row 3: Playlist shortcuts ──────────────────────────────────────────
+
+    @discord.ui.button(label="🟢 Add Spotify Playlist", style=discord.ButtonStyle.secondary, row=3)
+    async def cp_spotify_playlist(self, interaction: discord.Interaction, _):
+        """Open a modal so the user can paste a Spotify playlist URL."""
+        modal = PlaylistModal(
+            cog=self.cog,
+            guild_id=self.guild_id,
+            platform="spotify",
+            title="Add Spotify Playlist",
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="🎬 Add YouTube Playlist", style=discord.ButtonStyle.secondary, row=3)
+    async def cp_yt_playlist(self, interaction: discord.Interaction, _):
+        """Open a modal so the user can paste a YouTube playlist URL."""
+        modal = PlaylistModal(
+            cog=self.cog,
+            guild_id=self.guild_id,
+            platform="youtube",
+            title="Add YouTube Playlist",
+        )
+        await interaction.response.send_modal(modal)
+
+
+# ─────────────────────────────────────────────
+# Playlist Modal  (used by ControlPanelView buttons)
+# ─────────────────────────────────────────────
+
+class PlaylistModal(discord.ui.Modal):
+    """
+    A simple one-field modal that lets users paste a Spotify or YouTube
+    playlist URL directly into the control panel without typing a command.
+    """
+    playlist_url: discord.ui.TextInput = discord.ui.TextInput(
+        label="Playlist URL",
+        placeholder="https://open.spotify.com/playlist/… or https://youtube.com/playlist?list=…",
+        min_length=10,
+        max_length=300,
+        required=True,
+    )
+
+    def __init__(self, cog: "MusicCog", guild_id: int, platform: str, title: str):
+        super().__init__(title=title)
+        self.cog      = cog
+        self.guild_id = guild_id
+        self.platform = platform   # "spotify" | "youtube"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        url   = self.playlist_url.value.strip()
+        state = self.cog.get_state(self.guild_id)
+
+        # ── Ensure the bot is in a voice channel ──────────────────────────
+        if not await self.cog._ensure_voice(interaction):
+            return
+
+        loaded = await self.cog._import_playlist(interaction, url)
+        if not loaded:
+            await interaction.followup.send(
+                "❌ That URL wasn't recognised.\n"
+                "🟢 Spotify: `https://open.spotify.com/playlist/<id>`\n"
+                "🎬 YouTube: `https://www.youtube.com/playlist?list=<id>`",
+                ephemeral=True,
+            )
+            return
+
+        # Start playback if idle
+        if state.voice_client and not state.voice_client.is_playing() and not state.voice_client.is_paused():
+            await self.cog._play_next(interaction.guild)
+
+
+# ─────────────────────────────────────────────
+# Control panel embed builder
+# ─────────────────────────────────────────────
+
+def build_control_panel_embed(state: Optional[GuildMusicState]) -> discord.Embed:
+    """Build the rich embed displayed by /controls."""
+    embed = discord.Embed(
+        title="🎛️ Music Controls",
+        color=discord.Color.blurple(),
+    )
+
+    if state and state.current:
+        song = state.current
+        source_icons = {"youtube": "🎬", "soundcloud": "🟠", "spotify→youtube": "🟢"}
+        icon = source_icons.get(song.source, "🎵")
+
+        status = "▶️ Playing" if (state.voice_client and state.voice_client.is_playing()) else "⏸️ Paused"
+        embed.description = (
+            f"{status}\n"
+            f"**{icon} [{song.title}]({song.webpage})**"
+        )
+        embed.add_field(name="Duration",   value=song.duration_str,             inline=True)
+        embed.add_field(name="Requested",  value=song.requester.mention if song.requester else "—", inline=True)
+        embed.add_field(name="Queue",      value=f"{len(state.queue)} up next",  inline=True)
+        embed.add_field(name="Volume",     value=f"{round(state.volume * 100)}%", inline=True)
+
+        # Loop / shuffle status
+        modes = []
+        if state.loop:       modes.append("🔂 Song")
+        if state.loop_queue: modes.append("🔁 Queue")
+        if state.shuffle:    modes.append("🔀 Shuffle")
+        embed.add_field(name="Modes", value=" · ".join(modes) if modes else "—", inline=True)
+
+        if song.thumbnail:
+            embed.set_thumbnail(url=song.thumbnail)
+    else:
+        embed.description = "📭 Nothing is playing right now.\nUse `/play` or add a playlist below."
+
+    embed.set_footer(text="Buttons update in real-time · Use /controls to repost this panel")
+    return embed
+
+
 def build_now_playing_embed(song: Song, queue_len: int) -> discord.Embed:
     source_icons = {"youtube": "🎬", "soundcloud": "🟠", "spotify→youtube": "🟢"}
     icon = source_icons.get(song.source, "🎵")
@@ -370,17 +833,6 @@ def build_now_playing_embed(song: Song, queue_len: int) -> discord.Embed:
     embed.add_field(name="Duration",   value=song.duration_str,                inline=True)
     embed.add_field(name="Requested",  value=song.requester.mention if song.requester else "—", inline=True)
     embed.add_field(name="Queue",      value=f"{queue_len} song(s) up next",   inline=True)
-
-    # ── YouTube hint ──────────────────────────────────────────────────────────
-    # Tell users about the Watch button that appears below the embed.
-    # (The actual button is in NowPlayingView, not in the embed itself.)
-    if song.is_youtube:
-        embed.add_field(
-            name="🎬 Video",
-            value="Click **▶ Watch on YouTube** below to watch the video!",
-            inline=False,
-        )
-
     if song.thumbnail:
         embed.set_thumbnail(url=song.thumbnail)
     return embed
@@ -443,10 +895,6 @@ class MusicCog(commands.Cog):
             await self._play_next(guild)
             return
 
-        # Preserve the original source label (e.g. "spotify→youtube") after re-resolve
-        resolved.source    = song.source
-        resolved.requester = song.requester
-
         import shutil
         ffmpeg_bin = shutil.which("ffmpeg")
         if not ffmpeg_bin:
@@ -468,11 +916,9 @@ class MusicCog(commands.Cog):
 
         state.voice_client.play(audio, after=after_song)
 
-        # ── Build now-playing embed + view ────────────────────────────────────
-        # NowPlayingView now receives the song so it can inject the YouTube
-        # watch-link button when appropriate.
-        embed = build_now_playing_embed(resolved, len(state.queue))
-        view  = NowPlayingView(self, guild.id, song=resolved)
+        # Post / update now-playing embed
+        embed = build_now_playing_embed(song, len(state.queue))
+        view  = NowPlayingView(self, guild.id)
 
         if state.now_playing_msg and state.text_channel:
             try:
@@ -530,9 +976,199 @@ class MusicCog(commands.Cog):
 
     # ── Slash commands ────────────────────────
 
-    @app_commands.command(name="play", description="Play a song from YouTube, SoundCloud, or Spotify")
+    # ── Shared playlist import helper ─────────────────────────────────────
+
+    async def _import_playlist(
+        self,
+        interaction: discord.Interaction,
+        url: str,
+    ) -> bool:
+        """
+        Detect the playlist type from the URL, fetch all tracks, add them
+        to the queue, and post a rich confirmation embed.
+
+        Supports:
+          • https://open.spotify.com/playlist/<id>   — Spotify playlist (paginated)
+          • https://open.spotify.com/album/<id>      — Spotify album
+          • https://www.youtube.com/playlist?list=   — YouTube playlist
+          • https://youtube.com/... or youtu.be/...  — any YouTube URL
+
+        Returns True if tracks were loaded, False on failure.
+        Called by both /play and /playlist so logic is never duplicated.
+        """
+        state = self.get_state(interaction.guild_id)
+
+        # ── Spotify playlist ─────────────────────────────────────────────
+        if "spotify.com/playlist" in url:
+            if not self.spotify.available:
+                await interaction.followup.send(
+                    "❌ Spotify isn't configured. Add `SPOTIFY_CLIENT_ID` and "
+                    "`SPOTIFY_CLIENT_SECRET` to your `.env`.",
+                    ephemeral=True,
+                )
+                return False
+
+            # Run in executor — spotipy is synchronous
+            pl = await self.bot.loop.run_in_executor(
+                None, self.spotify.get_playlist, url
+            )
+            if not pl or not pl.tracks:
+                await interaction.followup.send(
+                    "❌ Could not load that Spotify playlist.\n"
+                    "Make sure it's **public** and the link is correct.",
+                    ephemeral=True,
+                )
+                return False
+
+            for t in pl.tracks:
+                state.queue.append(Song(
+                    title     = f"{t.artist} - {t.title}",
+                    url       = "",
+                    webpage   = "",
+                    duration  = t.duration_ms // 1000,
+                    thumbnail = t.thumbnail,
+                    requester = interaction.user,
+                    source    = "spotify→youtube",
+                ))
+
+            embed = discord.Embed(
+                title       = f"🟢 Spotify Playlist Imported",
+                description = f"**[{pl.name}]({url})**\nby {pl.owner}",
+                color       = discord.Color.green(),
+            )
+            embed.add_field(name="Tracks added", value=str(len(pl.tracks)), inline=True)
+            embed.add_field(name="Queue size",   value=str(len(state.queue)),  inline=True)
+            # Show first 5 track names as a preview
+            preview = "\n".join(
+                f"`{i}.` {t.artist} — {t.title}"
+                for i, t in enumerate(pl.tracks[:5], 1)
+            )
+            if len(pl.tracks) > 5:
+                preview += f"\n*…and {len(pl.tracks) - 5} more*"
+            embed.add_field(name="Preview", value=preview, inline=False)
+            if pl.cover_url:
+                embed.set_thumbnail(url=pl.cover_url)
+            embed.set_footer(text="Tracks will be searched on YouTube as they play")
+            await interaction.followup.send(embed=embed)
+            return True
+
+        # ── Spotify album ────────────────────────────────────────────────
+        if "spotify.com/album" in url:
+            if not self.spotify.available:
+                await interaction.followup.send(
+                    "❌ Spotify isn't configured. Add `SPOTIFY_CLIENT_ID` and "
+                    "`SPOTIFY_CLIENT_SECRET` to your `.env`.",
+                    ephemeral=True,
+                )
+                return False
+
+            album = await self.bot.loop.run_in_executor(
+                None, self.spotify.get_album, url
+            )
+            if not album or not album.tracks:
+                await interaction.followup.send(
+                    "❌ Could not load that Spotify album.\n"
+                    "Make sure the link is correct.",
+                    ephemeral=True,
+                )
+                return False
+
+            for t in album.tracks:
+                state.queue.append(Song(
+                    title     = f"{t.artist} - {t.title}",
+                    url       = "",
+                    webpage   = "",
+                    duration  = t.duration_ms // 1000,
+                    thumbnail = t.thumbnail,
+                    requester = interaction.user,
+                    source    = "spotify→youtube",
+                ))
+
+            embed = discord.Embed(
+                title       = "🟢 Spotify Album Imported",
+                description = f"**[{album.name}]({url})**",
+                color       = discord.Color.green(),
+            )
+            embed.add_field(name="Tracks added", value=str(len(album.tracks)), inline=True)
+            embed.add_field(name="Queue size",   value=str(len(state.queue)),  inline=True)
+            if album.cover_url:
+                embed.set_thumbnail(url=album.cover_url)
+            await interaction.followup.send(embed=embed)
+            return True
+
+        # ── YouTube playlist ─────────────────────────────────────────────
+        if ("youtube.com" in url or "youtu.be" in url):
+            def _flat(q: str):
+                try:
+                    return yt_dlp.YoutubeDL(YTDL_PLAYLIST_OPTIONS).extract_info(
+                        q, download=False
+                    )
+                except Exception as e:
+                    print(f"[yt-dlp] Playlist extract error: {e}")
+                    return None
+
+            info = await self.bot.loop.run_in_executor(None, _flat, url)
+
+            # If it's a single video URL with no playlist param, fall through
+            if not info:
+                await interaction.followup.send(
+                    "❌ Could not load that YouTube playlist.\n"
+                    "Make sure it's **public** and the URL is correct.",
+                    ephemeral=True,
+                )
+                return False
+
+            # yt-dlp returns either a playlist dict (has "entries") or a single video
+            if "entries" not in info:
+                # It's a single video — treat it as such
+                return False  # caller will handle as single track
+
+            pl_title = info.get("title") or info.get("id") or "YouTube Playlist"
+            pl_url   = info.get("webpage_url") or url
+            entries  = [e for e in info["entries"] if e]  # filter None (private vids)
+
+            for entry in entries:
+                vid_id  = entry.get("id")
+                webpage = (
+                    f"https://www.youtube.com/watch?v={vid_id}"
+                    if vid_id else entry.get("url", "")
+                )
+                state.queue.append(Song(
+                    title     = entry.get("title") or "Unknown Video",
+                    url       = "",
+                    webpage   = webpage,
+                    duration  = entry.get("duration") or 0,
+                    thumbnail = entry.get("thumbnail") or "",
+                    requester = interaction.user,
+                    source    = "youtube",
+                ))
+
+            embed = discord.Embed(
+                title       = "🎬 YouTube Playlist Imported",
+                description = f"**[{pl_title}]({pl_url})**",
+                color       = discord.Color.red(),
+            )
+            embed.add_field(name="Tracks added", value=str(len(entries)),        inline=True)
+            embed.add_field(name="Queue size",   value=str(len(state.queue)),    inline=True)
+            # Preview first 5
+            preview = "\n".join(
+                f"`{i}.` {e.get('title', 'Unknown')}"
+                for i, e in enumerate(entries[:5], 1)
+            )
+            if len(entries) > 5:
+                preview += f"\n*…and {len(entries) - 5} more*"
+            embed.add_field(name="Preview", value=preview, inline=False)
+            await interaction.followup.send(embed=embed)
+            return True
+
+        # Not a playlist URL
+        return False
+
+    # ── /play command ──────────────────────────────────────────────────────
+
+    @app_commands.command(name="play", description="Play a song or paste a Spotify/YouTube playlist URL")
     @app_commands.describe(
-        query="Song name, artist, or URL (YouTube / SoundCloud / Spotify)",
+        query="Song name, URL, or paste a full Spotify/YouTube playlist link",
         source="Prefer a specific platform (default: auto)"
     )
     @app_commands.choices(source=[
@@ -547,9 +1183,7 @@ class MusicCog(commands.Cog):
         query: str,
         source: app_commands.Choice[str] = None,
     ):
-        # Defer FIRST — Discord interaction tokens expire after 3 seconds.
-        # Voice connection can take much longer (especially on first join or
-        # after a 4006 retry), so we must secure the token before any I/O.
+        # Defer FIRST — Discord tokens expire in 3s, voice connection takes longer
         await interaction.response.defer(thinking=True)
 
         if not await self._ensure_voice(interaction):
@@ -558,87 +1192,38 @@ class MusicCog(commands.Cog):
         src_val = source.value if source else "auto"
         state   = self.get_state(interaction.guild_id)
 
-        # ── Spotify playlist? ──
-        if "spotify.com/playlist" in query:
-            tracks = self.spotify.get_playlist_tracks(query)
-            if not tracks:
-                await interaction.followup.send("❌ Could not load Spotify playlist.", ephemeral=True)
-                return
-            for t in tracks:
-                song = Song(
-                    title=t,
-                    url="",
-                    webpage="",
-                    duration=0,
-                    thumbnail="",
-                    requester=interaction.user,
-                    source="spotify→youtube",
-                )
-                state.queue.append(song)
-            await interaction.followup.send(
-                f"🟢 Added **{len(tracks)}** tracks from Spotify playlist to the queue."
-            )
-            if not state.voice_client.is_playing() and not state.voice_client.is_paused():
-                await self._play_next(interaction.guild)
-            return
-
-        # ── YouTube playlist? ──
-        if "list=" in query and ("youtube.com" in query or "youtu.be" in query):
-            def _extract_playlist(q):
-                ytdl_flat = yt_dlp.YoutubeDL({"extract_flat": True, "quiet": True, "skip_download": True})
-                try:
-                    return ytdl_flat.extract_info(q, download=False)
-                except Exception as e:
-                    print(f"[yt-dlp] Playlist extract error: {e}")
-                    return None
-
-            playlist_info = await self.bot.loop.run_in_executor(None, _extract_playlist, query)
-            if playlist_info and "entries" in playlist_info:
-                entries = playlist_info["entries"]
-                added_count = 0
-                for entry in entries:
-                    if not entry:
-                        continue
-                    video_id = entry.get("id")
-                    webpage = f"https://www.youtube.com/watch?v={video_id}" if video_id else entry.get("url", "")
-                    song = Song(
-                        title=entry.get("title") or "Unknown Video",
-                        url="",
-                        webpage=webpage,
-                        duration=entry.get("duration") or 0,
-                        thumbnail=entry.get("thumbnail") or "",
-                        requester=interaction.user,
-                        source="youtube",
-                    )
-                    state.queue.append(song)
-                    added_count += 1
-
-                await interaction.followup.send(
-                    f"🎬 Added **{added_count}** tracks from YouTube playlist to the queue."
-                )
+        # ── Playlist URLs: Spotify playlist/album or YouTube playlist ──────
+        # _import_playlist returns True if it handled it, False to fall through
+        is_playlist_url = (
+            "spotify.com/playlist" in query
+            or "spotify.com/album"  in query
+            or ("list=" in query and ("youtube.com" in query or "youtu.be" in query))
+        )
+        if is_playlist_url:
+            loaded = await self._import_playlist(interaction, query)
+            if loaded:
                 if not state.voice_client.is_playing() and not state.voice_client.is_paused():
                     await self._play_next(interaction.guild)
-                return
-            else:
-                await interaction.followup.send("❌ Could not load YouTube playlist.", ephemeral=True)
-                return
+            return
 
-        # ── Spotify single track? ──
+        # ── Spotify single track ───────────────────────────────────────────
         if src_val == "spotify" or "spotify.com/track" in query:
-            yt_query = self.spotify.search(query)
-            if not yt_query:
+            info = self.spotify.search_track(query)
+            if not info:
                 await interaction.followup.send(
-                    "❌ Spotify search failed. Trying YouTube instead...", ephemeral=True
+                    "❌ Spotify search failed — trying YouTube instead…", ephemeral=True
                 )
-                yt_query = query
-            search_query = yt_query
-            label = "spotify→youtube"
+                search_query = query
+                label = "youtube"
+            else:
+                search_query = info.search_query
+                label = "spotify→youtube"
         elif src_val == "soundcloud":
             search_query = f"scsearch:{query}"
             label = "soundcloud"
         else:
             search_query = query
-            label = None   # YTDLSource auto-detects
+            label = None  # YTDLSource auto-detects
 
         song = await YTDLSource.resolve(search_query, self.bot.loop)
         if not song:
@@ -653,16 +1238,15 @@ class MusicCog(commands.Cog):
 
         if state.voice_client.is_playing() or state.voice_client.is_paused():
             embed = discord.Embed(
-                description=f"➕ Added to queue: **[{song.title}]({song.webpage})**\n"
-                            f"Position: #{len(state.queue)}  •  {song.duration_str}",
+                description=(
+                    f"➕ Added to queue: **[{song.title}]({song.webpage})**\n"
+                    f"Position: #{len(state.queue)}  •  {song.duration_str}"
+                ),
                 color=discord.Color.blurple(),
             )
             if song.thumbnail:
                 embed.set_thumbnail(url=song.thumbnail)
-
-            # ── Attach a watch-link button to the "added to queue" message too ──
-            queue_view = build_youtube_watch_view(song)
-            await interaction.followup.send(embed=embed, view=queue_view)
+            await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send(f"▶️ Starting **{song.title}**…")
             await self._play_next(interaction.guild)
@@ -773,8 +1357,7 @@ class MusicCog(commands.Cog):
             await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
             return
         embed = build_now_playing_embed(state.current, len(state.queue))
-        # Pass current song so the YouTube watch button is included
-        view  = NowPlayingView(self, interaction.guild_id, song=state.current)
+        view  = NowPlayingView(self, interaction.guild_id)
         await interaction.response.send_message(embed=embed, view=view)
 
     @app_commands.command(name="remove", description="Remove a song from the queue by position")
@@ -799,7 +1382,7 @@ class MusicCog(commands.Cog):
     @app_commands.describe(query="The song to search lyrics for (optional, defaults to current song)")
     async def lyrics(self, interaction: discord.Interaction, query: str = None):
         await interaction.response.defer()
-
+        
         search_query = query
         if not search_query:
             state = self.get_state(interaction.guild_id)
@@ -808,9 +1391,9 @@ class MusicCog(commands.Cog):
             else:
                 await interaction.followup.send("❌ Nothing is currently playing, and no search query was provided.", ephemeral=True)
                 return
-
+        
         url = f"https://some-random-api.com/lyrics?title={aiohttp.helpers.quote_plus(search_query)}"
-
+        
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
@@ -820,15 +1403,15 @@ class MusicCog(commands.Cog):
                         title = data.get("title", "Unknown")
                         author = data.get("author", "Unknown")
                         thumbnail = data.get("thumbnail", {}).get("genius", "")
-
+                        
                         if not lyrics_text:
                             await interaction.followup.send(f"❌ Could not find lyrics for **{search_query}**.", ephemeral=True)
                             return
-
+                        
                         embeds = []
                         # Chunk the lyrics to fit within embed limits
                         chunks = [lyrics_text[i:i+2000] for i in range(0, len(lyrics_text), 2000)]
-
+                        
                         for idx, chunk in enumerate(chunks):
                             embed = discord.Embed(
                                 title=f"🎶 Lyrics: {title} by {author}" if idx == 0 else f"🎶 {title} (continued)",
@@ -840,13 +1423,60 @@ class MusicCog(commands.Cog):
                             if idx == len(chunks) - 1:
                                 embed.set_footer(text="Source: Genius via Some Random API")
                             embeds.append(embed)
-
+                        
                         await interaction.followup.send(embeds=embeds)
                     else:
                         await interaction.followup.send(f"❌ Error searching lyrics (API returned status {resp.status}).", ephemeral=True)
         except Exception as e:
             print(f"[Lyrics] Error: {e}")
             await interaction.followup.send("❌ An error occurred while fetching lyrics.", ephemeral=True)
+
+
+    @app_commands.command(name="controls", description="Post a persistent music control panel")
+    async def controls(self, interaction: discord.Interaction):
+        """
+        Posts (or reposts) the full control panel embed with all buttons.
+        Safe to run at any time — works even when nothing is playing yet.
+        """
+        state = self.get_state(interaction.guild_id)
+        embed = build_control_panel_embed(state)
+        view  = ControlPanelView(self, interaction.guild_id)
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @app_commands.command(name="playlist", description="Import a Spotify playlist/album or YouTube playlist into the queue")
+    @app_commands.describe(url="Paste your Spotify playlist/album URL or YouTube playlist URL here")
+    async def playlist_cmd(self, interaction: discord.Interaction, url: str):
+        """
+        Dedicated playlist import command.
+        Accepts:
+          • https://open.spotify.com/playlist/<id>?si=...
+          • https://open.spotify.com/album/<id>
+          • https://www.youtube.com/playlist?list=<id>
+
+        Auto-detects the type from the URL — just paste and go.
+        """
+        await interaction.response.defer(thinking=True)
+
+        if not await self._ensure_voice(interaction):
+            return
+
+        state  = self.get_state(interaction.guild_id)
+        loaded = await self._import_playlist(interaction, url)
+
+        if not loaded:
+            await interaction.followup.send(
+                "❌ That URL wasn't recognised as a supported playlist.\n\n"
+                "**Supported formats:**\n"
+                "🟢 `https://open.spotify.com/playlist/<id>`\n"
+                "🟢 `https://open.spotify.com/album/<id>`\n"
+                "🎬 `https://www.youtube.com/playlist?list=<id>`",
+                ephemeral=True,
+            )
+            return
+
+        # Kick off playback if idle
+        if state.voice_client and not state.voice_client.is_playing() and not state.voice_client.is_paused():
+            await self._play_next(interaction.guild)
 
 
 # ─────────────────────────────────────────────
