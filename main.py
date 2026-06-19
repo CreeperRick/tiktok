@@ -159,7 +159,7 @@ async def removeaccount(interaction: discord.Interaction, tiktok_username: str):
 @tree.command(name="listaccounts", description="Show all tracked TikTok accounts on this server")
 async def listaccounts(interaction: discord.Interaction):
     if not can_use_bot(interaction):
-        await interaction.response.send_message("⛔ You don't have permission to use FreshTok.", ephemeral=True)
+        await interaction.response.send_message("⛔ You don't have permission to use TikTok.", ephemeral=True)
         return
 
     accounts = load_accounts()
@@ -392,7 +392,7 @@ async def disappoint(
     reason: str = None,
 ):
     if not can_use_bot(interaction):
-        await interaction.response.send_message("⛔ You don't have permission to use FreshTok.", ephemeral=True)
+        await interaction.response.send_message("⛔ You don't have permission to use TikTok.", ephemeral=True)
         return
 
     message = reason if reason else random.choice(DISAPPOINTMENT_MESSAGES)
@@ -401,12 +401,12 @@ async def disappoint(
         name=f"{interaction.user.display_name} is disappointed in you",
         icon_url=interaction.user.display_avatar.url,
     )
-    embed.set_footer(text="FreshTok Disappointment Service™")
+    embed.set_footer(text="TikTok Disappointment Service™")
     await interaction.response.send_message(content=user.mention, embed=embed)
 
 
 # ── /setplan  (owner only) ────────────────────────────────────────────────────
-@tree.command(name="setplan", description="[Owner] Restrict FreshTok to specific roles. Permanent.")
+@tree.command(name="setplan", description="[Owner] Restrict TikTok to specific roles. Permanent.")
 @app_commands.describe(
     role1="Required role", role2="Optional", role3="Optional", role4="Optional"
 )
@@ -440,7 +440,7 @@ async def setplan(
     view = _ConfirmLockView(interaction.user.id, interaction.guild_id, role_ids, role_mentions)
     await interaction.response.send_message(
         f"⚠️ **This is permanent and cannot be reversed.**\n\n"
-        f"Restricting FreshTok to:\n{role_mentions}\n\nAre you sure?",
+        f"Restricting TikTok to:\n{role_mentions}\n\nAre you sure?",
         view=view, ephemeral=True,
     )
 
@@ -471,7 +471,7 @@ class _ConfirmLockView(discord.ui.View):
 
 
 # ── /planinfo ─────────────────────────────────────────────────────────────────
-@tree.command(name="planinfo", description="Show who is allowed to use FreshTok")
+@tree.command(name="planinfo", description="Show who is allowed to use TikTok")
 async def planinfo(interaction: discord.Interaction):
     guild_cfg = load_guild(interaction.guild_id)
     allowed = guild_cfg.get("allowed_roles", [])
@@ -494,7 +494,7 @@ def _build_embed(username: str, video: dict) -> discord.Embed:
     embed.set_author(name=f"@{username}")
     if video.get("cover"):
         embed.set_image(url=video["cover"])
-    embed.set_footer(text="🎵 FreshTok  •  via TikTok")
+    embed.set_footer(text="🎵 TikTok  •  via TikTok")
     return embed
 
 
@@ -546,7 +546,7 @@ async def on_ready():
                 mod_tasks.start()
             except RuntimeError:
                 pass
-    print(f"✅ FreshTok online as {bot.user}  ({len(load_accounts())} accounts tracked)")
+    print(f"✅  online as {bot.user}  ({len(load_accounts())} accounts tracked)")
 
 
 from music import setup as setup_music
