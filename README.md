@@ -1,4 +1,4 @@
-# FreshTok Discord Bot
+#Discord Bot
 
 A Discord bot that monitors TikTok accounts and posts new-video alerts to your server — with a full music player and moderation system. Built with **discord.py 2.x** and **yt-dlp**.
 
@@ -239,7 +239,7 @@ python3 main.py
 
 Expected output:
 ```
-✅ FreshTok online as FreshTok#1234 (0 accounts tracked)
+✅ TikTok online as TikTok#1234 (0 accounts tracked)
 ```
 
 The bot will create a `data/` folder automatically on first run.
@@ -255,7 +255,7 @@ Use this to keep the bot running after reboots without keeping a terminal open.
 1. Search for **Task Scheduler** in Start and open it.
 2. Click **Create Basic Task** on the right panel.
 3. Fill in the wizard:
-   - **Name:** `FreshTok Bot`
+   - **Name:** `TikTok Bot`
    - **Trigger:** `When the computer starts`
    - **Action:** `Start a program`
    - **Program/script:** full path to your venv Python, e.g.:
@@ -294,14 +294,14 @@ Then add a shortcut to this `.bat` file in your Windows **Startup** folder:
 ### Linux — systemd
 
 ```bash
-sudo nano /etc/systemd/system/freshtok.service
+sudo nano /etc/systemd/system/Tiktok.service
 ```
 
 Paste the following — **replace the paths** with your actual username and bot location:
 
 ```ini
 [Unit]
-Description=FreshTok Discord Bot
+Description=TikTok Discord Bot
 After=network-online.target
 Wants=network-online.target
 
@@ -322,15 +322,15 @@ Enable and start the service:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable freshtok
-sudo systemctl start freshtok
-sudo systemctl status freshtok
+sudo systemctl enable tiktok
+sudo systemctl start tiktok
+sudo systemctl status tiktok
 ```
 
 View live logs:
 
 ```bash
-sudo journalctl -u freshtok -f
+sudo journalctl -u tiktok -f
 ```
 
 ---
