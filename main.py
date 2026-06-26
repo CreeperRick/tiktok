@@ -549,13 +549,14 @@ async def on_ready():
                 pass
 
     # ── Rich Presence (Streaming) ──────────────────────────────────────────────
-await bot.change_presence(
+    await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Activity(
-            type=discord.ActivityType.competing,         # "Competing in Femboy"
-            name="Femboy",
-            details="Femboy",
-            state="Botting",
+            type=discord.ActivityType.streaming,
+            url="https://www.twitch.tv/creeperRick_",   # Twitch URL required for purple dot
+            name="Femboy",                               # "Streaming Femboy"
+            details="Femboy",                            # Second line
+            state="Botting",                             # Third line
             assets={
                 "large_image": "https://media1.tenor.com/m/kbp97L3zbKIAAAAd/astolfo.gif",
                 "large_text":  "Femboy",
