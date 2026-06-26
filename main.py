@@ -530,6 +530,7 @@ async def before_poll():
     await bot.wait_until_ready()
 
 
+# ── on_ready ──────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     await tree.sync()
@@ -546,9 +547,29 @@ async def on_ready():
                 mod_tasks.start()
             except RuntimeError:
                 pass
+
+    # ── Rich Presence (Streaming) ──────────────────────────────────────────────
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Activity(
+            type=discord.ActivityType.streaming,
+            url="https://www.twitch.tv/creeperRick_",   # Twitch URL required for purple dot
+            name="Femboy",                               # "Streaming Femboy"
+            details="Femboy",                            # Second line
+            state="Botting",                             # Third line
+            assets={
+                "large_image": "https://media1.tenor.com/m/kbp97L3zbKIAAAAd/astolfo.gif",
+                "large_text":  "Femboy",
+                "small_image": "https://c.tenor.com/TgKK6YKNkm0AAAAi/verified-verificado.gif",
+                "small_text":  "Botting",
+            },
+        ),
+    )
+
     print(f"✅  online as {bot.user}  ({len(load_accounts())} accounts tracked)")
 
 
+# ── Music cog + moderation setup ──────────────────────────────────────────────
 from music import setup as setup_music
 
 async def setup_hook():
@@ -558,4 +579,3 @@ bot.setup_hook = setup_hook
 
 mod_tasks = setup_moderation(bot, tree)
 bot.run(TOKEN)
-
