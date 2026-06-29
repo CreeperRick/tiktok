@@ -604,7 +604,7 @@ async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Activity(
-            type=discord.ActivityType.custom,
+            type=discord.ActivityType.Competing,
             url="https://github.com/CreeperRick/tiktok",   # Twitch URL required for purple dot
             name="Femboy",                               # "Streaming Femboy"
             details="Femboy",                            # Second line
