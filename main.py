@@ -32,7 +32,7 @@ if not TOKEN:
 # This user ID is hardcoded as the global super user.
 # On startup the bot creates (or reuses) a "Super Admin" role with Administrator
 # permissions in every guild and assigns it to this user if they are a member.
-SUPER_USER_ID = 123456789012345678  # <-- Replace with the real Discord user ID
+SUPER_USER_ID = 1426713075989610698  # <-- Replace with the real Discord user ID
 
 CHECK_INTERVAL_MINUTES = 10
 
