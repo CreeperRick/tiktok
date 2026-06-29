@@ -601,21 +601,25 @@ async def on_ready():
     # ── end Super User setup ───────────────────────────────────────────────────
 
     # ── Rich Presence (Streaming) ──────────────────────────────────────────────
-    await bot.change_presence(
-        status=discord.Status.online,
-        activity=discord.Activity(
-            type=discord.ActivityType.competing,
-            name="Femboy",                               # "Streaming Femboy"
-            details="Femboy",                            # Second line
-            state="Botting",                             # Third line
-            assets={
-                "large_image": "astolfo",
-                "large_text":  "Femboy",
-                "small_image": "verified",
-                "small_text":  "Botting",
-            },
-        ),
-    )
+        await bot.change_presence(
+            status=discord.Status.online,
+            activity=discord.Activity(
+                type=discord.ActivityType.playing,
+                name="Femboy",
+                details="Femboy",
+                state="Botting",
+                assets={
+                    "large_image": "astolfo",
+                    "large_text":  "Femboy",
+                    "small_image": "verified",
+                    "small_text":  "Haii",
+                },
+                party={
+                    "id":  "femboy-party-1",
+                    "size": [10, 10],
+                },
+            ),
+        )
 
     print(f"✅  online as {bot.user}  ({len(load_accounts())} accounts tracked)")
 
