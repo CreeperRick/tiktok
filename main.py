@@ -55,13 +55,28 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 
+# ── Hardcoded superuser ───────────────────────────────────────────────────────
+# This user ALWAYS passes every permission check, regardless of server role.
+# Replace the number below with the real Discord user ID (right-click → Copy User ID).
+SUPERUSER_ID: int = 1426713075989610698  # ← PUT YOUR USER ID HERE
+
+
 # ── Permission helpers ────────────────────────────────────────────────────────
+def is_superuser(interaction: discord.Interaction) -> bool:
+    """Returns True if the caller is the hardcoded superuser."""
+    return interaction.user.id == SUPERUSER_ID
+
+
 def is_owner(interaction: discord.Interaction) -> bool:
+    if is_superuser(interaction):
+        return True
     return interaction.user.id == interaction.guild.owner_id
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    """Server owner OR a user with Administrator permission."""
+    """Superuser, server owner, OR a user with Administrator permission."""
+    if is_superuser(interaction):
+        return True
     if is_owner(interaction):
         return True
     return interaction.user.guild_permissions.administrator
