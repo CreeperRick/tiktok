@@ -609,9 +609,9 @@ async def on_ready():
             details="Femboy",                            # Second line
             state="Botting",                             # Third line
             assets={
-                "large_image": "https://media1.tenor.com/m/kbp97L3zbKIAAAAd/astolfo.gif",
+                "large_image": "astolfo",
                 "large_text":  "Femboy",
-                "small_image": "https://c.tenor.com/TgKK6YKNkm0AAAAi/verified-verificado.gif",
+                "small_image": "verified",
                 "small_text":  "Botting",
             },
         ),
